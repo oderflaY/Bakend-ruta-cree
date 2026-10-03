@@ -1,0 +1,174 @@
+# RutaCree backend: API (Go) + MariaDB, with an optional Caddy for HTTPS.
+#
+#   ./scripts/generar-secretos.sh     # once: creates ./secrets/*
+#   cp .env.example .env              # adjust ADMIN_EMAIL, ports, domain
+#   docker compose up -d --build
+#   docker compose --profile https up -d   # production, with automatic TLS (needs DOMAIN)
+
+name: rutacree
+
+services:
+  db:
+    image: mariadb:11.8
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: rutacree
+      MARIADB_USER: rutacree
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_AUTO_UPGRADE: "1"
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+      - --skip-name-resolve
+      - --local-infile=0
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=100
+    secrets: [db_password, db_root_password, traccar_db_password]
+    volumes:
+      - db_data:/var/lib/mysql
+      # Creates Traccar's database on a fresh volume (existing volume: scripts/traccar-db.sh).
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    # No published ports: MariaDB is reachable only from the API on the internal network.
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 768M }
+    logging: &logging
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  api:
+    build: .
+    image: rutacree-api:latest
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DB_HOST: db
+      DB_NAME: rutacree
+      DB_USER: rutacree
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      # Only Caddy (fixed IP below) may set X-Forwarded-For. Never trust the whole subnet: traffic
+      # arriving through the published port shows up as the gateway (172.30.0.1).
+      TRUSTED_PROXIES: 172.30.0.10/32
+      POSITION_RETENTION_DAYS: ${POSITION_RETENTION_DAYS:-30}
+      # Traccar: bus positions come from Traccar Client on the driver's phone.
+      TRACCAR_URL: http://traccar:8082
+      TRACCAR_EMAIL: ${TRACCAR_EMAIL:-traccar@rutacree.mx}
+      TRACCAR_PASSWORD_FILE: /run/secrets/traccar_password
+      TRACCAR_PUBLIC_OSMAND_URL: ${TRACCAR_PUBLIC_OSMAND_URL:-}
+      # Control panel (Frontend admin), served at /panel/ from this same origin.
+      PANEL_DIR: /panel
+    secrets: [db_password, jwt_secret, admin_password, traccar_password]
+    volumes:
+      # In the VPS package the panel travels as ./panel; in development PANEL_SRC points at the
+      # panel's own folder (e.g. PANEL_SRC=../Frontend admin in .env).
+      - ${PANEL_SRC:-./panel}:/panel:ro
+    # Direct access for development / LAN testing with the phone. In production bind it to
+    # 127.0.0.1 (API_BIND=127.0.0.1) and expose only Caddy's 443.
+    ports:
+      - "${API_BIND:-0.0.0.0}:${API_PORT:-8080}:8080"
+    networks: [backend, edge]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 256M }
+    logging: *logging
+
+  # GPS server. The driver's phone runs Traccar Client (OsmAnd protocol, port 5055); the API reads
+  # the positions over Traccar's WebSocket. Web UI on port 8082 (user TRACCAR_EMAIL).
+  traccar:
+    image: traccar/traccar:6.9
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    volumes:
+      - ./secrets/traccar.xml:/opt/traccar/conf/traccar.xml:ro
+      - traccar_data:/opt/traccar/data
+      - traccar_logs:/opt/traccar/logs
+    ports:
+      - "${TRACCAR_BIND:-0.0.0.0}:${TRACCAR_OSMAND_PORT:-5055}:5055"
+      # The web UI is for admins only: loopback by default, reach it through an SSH tunnel.
+      - "${TRACCAR_WEB_BIND:-127.0.0.1}:${TRACCAR_WEB_PORT:-8082}:8082"
+    networks: [backend, edge]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/api/server"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        limits: { memory: 1G }
+    logging: *logging
+
+  caddy:
+    image: caddy:2.8-alpine
+    profiles: [https]
+    restart: unless-stopped
+    depends_on: [api, traccar]
+    environment:
+      DOMAIN: ${DOMAIN:-}  # obligatorio con el perfil https
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        ipv4_address: 172.30.0.10
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+
+networks:
+  backend:
+    internal: true # no Internet access for the database
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  db_data:
+  traccar_data:
+  traccar_logs:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_root_password:
+    file: ./secrets/db_root_password
+  jwt_secret:
+    file: ./secrets/jwt_secret
+  admin_password:
+    file: ./secrets/admin_password
+  traccar_db_password:
+    file: ./secrets/traccar_db_password
+  traccar_password:
+    file: ./secrets/traccar_password

@@ -1,0 +1,9 @@
+.git
+.env
+secrets
+scripts
+*.md
+Caddyfile
+docker-compose.yml
+respaldos
+panel

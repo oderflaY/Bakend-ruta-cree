@@ -1,0 +1,6 @@
+.env
+secrets/
+/api
+*.test
+respaldos/
+/panel

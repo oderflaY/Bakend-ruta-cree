@@ -8,10 +8,12 @@ import (
 )
 
 // panelCSP loosens SecurityHeaders' API policy just enough for the control panel: its own scripts,
-// Google Fonts, Esri map tiles, and API/WebSocket calls to this same origin.
-const panelCSP = "default-src 'self'; script-src 'self'; connect-src 'self'; " +
+// Google Fonts, map tiles (Mapbox, or Esri without a token) and API/WebSocket calls to this same
+// origin. MapLibre downloads tiles with fetch (connect-src) and decodes them as blob: images.
+const panelCSP = "default-src 'self'; script-src 'self'; " +
+	"connect-src 'self' https://api.mapbox.com https://server.arcgisonline.com; " +
 	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; " +
-	"img-src 'self' data: https://server.arcgisonline.com; " +
+	"img-src 'self' data: blob: https://api.mapbox.com https://server.arcgisonline.com; " +
 	"base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 // Static serves the files of dir (no directory listings, no dotfiles). Revalidated on every load so

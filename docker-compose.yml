@@ -71,6 +71,14 @@ services:
       TRACCAR_EMAIL: ${TRACCAR_EMAIL:-traccar@rutacree.mx}
       TRACCAR_PASSWORD_FILE: /run/secrets/traccar_password
       TRACCAR_PUBLIC_OSMAND_URL: ${TRACCAR_PUBLIC_OSMAND_URL:-}
+      # WhatsApp del despacho al que el chofer manda inicio/fin de ruta y fallas.
+      WHATSAPP_DESPACHO: ${WHATSAPP_DESPACHO:-}
+      # Chatbot de WhatsApp de los choferes (WhatsApp Cloud API de Meta). Vacío = apagado.
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_API_BASE: ${WHATSAPP_API_BASE:-https://graph.facebook.com/v23.0}
       # Control panel (Frontend admin), served at /panel/ from this same origin.
       PANEL_DIR: /panel
     secrets: [db_password, jwt_secret, admin_password, traccar_password]

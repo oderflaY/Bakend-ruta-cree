@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,19 @@ type Config struct {
 	TraccarPassword  string
 	TraccarOsmAndURL string
 
+	// Number (country code + digits, e.g. 5216181234567) the driver's WhatsApp reports go to.
+	// Empty: WhatsApp asks the driver to pick the chat or group.
+	DispatchWhatsApp string
+
+	// Drivers' WhatsApp chatbot (Cloud API). Enabled when WhatsAppPhoneID is set.
+	WhatsAppPhoneID     string
+	WhatsAppToken       string
+	WhatsAppAppSecret   string
+	WhatsAppVerifyToken string
+	WhatsAppAPIBase     string
+	// Time zone for the times the bot writes (the server runs in UTC).
+	LocalTimeZone string
+
 	// Bootstrap admin, created only when the admins table is empty.
 	AdminEmail    string
 	AdminPassword string
@@ -51,6 +65,8 @@ type Config struct {
 	PositionRetention time.Duration
 	MaxSocketClients  int
 }
+
+var whatsAppPattern = regexp.MustCompile(`^[0-9]{8,15}$`)
 
 func Load() (*Config, error) {
 	c := &Config{
@@ -69,6 +85,10 @@ func Load() (*Config, error) {
 		TraccarURL:        env("TRACCAR_URL", ""),
 		TraccarEmail:      strings.ToLower(strings.TrimSpace(env("TRACCAR_EMAIL", ""))),
 		TraccarOsmAndURL:  env("TRACCAR_PUBLIC_OSMAND_URL", ""),
+		DispatchWhatsApp:  env("WHATSAPP_DESPACHO", ""),
+		WhatsAppPhoneID:   strings.TrimSpace(env("WHATSAPP_PHONE_NUMBER_ID", "")),
+		WhatsAppAPIBase:   env("WHATSAPP_API_BASE", "https://graph.facebook.com/v23.0"),
+		LocalTimeZone:     env("ZONA_HORARIA", "America/Mexico_City"),
 		PositionRetention: 30 * 24 * time.Hour,
 		MaxSocketClients:  5000,
 	}
@@ -97,6 +117,23 @@ func Load() (*Config, error) {
 	}
 	if c.TraccarURL != "" && (c.TraccarEmail == "" || len(c.TraccarPassword) < 12) {
 		return nil, errors.New("con TRACCAR_URL hacen falta TRACCAR_EMAIL y TRACCAR_PASSWORD (mínimo 12 caracteres)")
+	}
+
+	if c.DispatchWhatsApp != "" && !whatsAppPattern.MatchString(c.DispatchWhatsApp) {
+		return nil, fmt.Errorf("WHATSAPP_DESPACHO debe ser solo dígitos con lada de país (ej. 5216181234567): %q", c.DispatchWhatsApp)
+	}
+
+	if c.WhatsAppToken, err = secretOptional("WHATSAPP_TOKEN"); err != nil {
+		return nil, err
+	}
+	if c.WhatsAppAppSecret, err = secretOptional("WHATSAPP_APP_SECRET"); err != nil {
+		return nil, err
+	}
+	if c.WhatsAppVerifyToken, err = secretOptional("WHATSAPP_VERIFY_TOKEN"); err != nil {
+		return nil, err
+	}
+	if c.WhatsAppPhoneID != "" && (c.WhatsAppToken == "" || c.WhatsAppAppSecret == "" || len(c.WhatsAppVerifyToken) < 16) {
+		return nil, errors.New("con WHATSAPP_PHONE_NUMBER_ID hacen falta WHATSAPP_TOKEN, WHATSAPP_APP_SECRET y WHATSAPP_VERIFY_TOKEN (mínimo 16 caracteres)")
 	}
 
 	if v := os.Getenv("POSITION_RETENTION_DAYS"); v != "" {

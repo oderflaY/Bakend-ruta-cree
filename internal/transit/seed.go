@@ -12,8 +12,16 @@ import (
 
 // Seed imports the app's bundled data on first boot: seed/routes/*.geojson and seed/drivers.json.
 // Drivers are created without a PIN (they can't start a shift until an admin sets one).
+// Only a database that never had routes is seeded: once an admin retires them all, they stay retired.
 func Seed(ctx context.Context, db *sql.DB, c *Catalog, dir string) error {
 	if dir == "" || !c.Empty() {
+		return nil
+	}
+	var stored int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM routes`).Scan(&stored); err != nil {
+		return err
+	}
+	if stored > 0 {
 		return nil
 	}
 	files, err := filepath.Glob(filepath.Join(dir, "routes", "*.geojson"))

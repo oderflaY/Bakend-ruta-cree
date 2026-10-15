@@ -44,3 +44,38 @@ func TestParseRouteRejects(t *testing.T) {
 		}
 	}
 }
+
+// Municipios and the start of the return trip are filled in for the published routes.
+func TestRouteMunicipiosAndReturn(t *testing.T) {
+	want := map[string][]string{
+		"azul-3": {"Durango"},
+		"azul-4": {"Durango"},
+		"cas-1":  {"Lerdo", "Gómez Palacio"},
+		"cas-3":  {"Lerdo", "Gómez Palacio"},
+	}
+	for id, municipios := range want {
+		data, err := os.ReadFile("../../seed/routes/" + id + ".geojson")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := ParseRoute(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(r.Municipios, ",") != strings.Join(municipios, ",") {
+			t.Errorf("%s: municipios %v, se esperaba %v", id, r.Municipios, municipios)
+		}
+		if !strings.Contains(string(r.GeoJSON), `"regreso_desde":`) {
+			t.Errorf("%s: sin regreso_desde", id)
+		}
+	}
+	// A one-way line has no return; an unknown municipio is rejected.
+	oneWay := `{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"id":"r-1","name":"R"},"geometry":{"type":"LineString","coordinates":[[-104.6,24.0],[-104.7,24.1]]}}]}`
+	r, err := ParseRoute([]byte(oneWay))
+	if err != nil || strings.Contains(string(r.GeoJSON), "regreso_desde") || r.Municipios[0] != "Durango" {
+		t.Errorf("ruta de un sentido: %v %s", err, r.GeoJSON)
+	}
+	if _, err := ParseRoute([]byte(strings.Replace(oneWay, `"name":"R"`, `"name":"R","municipios":["Atlantis"]`, 1))); err == nil {
+		t.Error("municipio desconocido debería rechazarse")
+	}
+}

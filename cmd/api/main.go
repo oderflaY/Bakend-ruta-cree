@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // the image has no zoneinfo; the bot writes local times
 
 	"github.com/eter/rutacree-backend/internal/admin"
 	"github.com/eter/rutacree-backend/internal/auth"
@@ -32,6 +33,7 @@ import (
 	"github.com/eter/rutacree-backend/internal/server"
 	"github.com/eter/rutacree-backend/internal/traccar"
 	"github.com/eter/rutacree-backend/internal/transit"
+	"github.com/eter/rutacree-backend/internal/whatsapp"
 )
 
 func main() {
@@ -57,6 +59,12 @@ func main() {
 				name = os.Args[4]
 			}
 			err = setDriverLogin(os.Args[2], os.Args[3], name)
+		}
+	case "publicar-ruta":
+		if len(os.Args) < 3 {
+			err = errors.New("uso: api publicar-ruta <ruta.geojson>...  (el API la toma al reiniciarse)")
+		} else {
+			err = publishRoutes(os.Args[2:])
 		}
 	default:
 		err = fmt.Errorf("comando desconocido: %s", cmd)
@@ -100,7 +108,8 @@ func serve() error {
 	hub := live.NewHub(cfg.MaxSocketClients)
 	recorder := live.NewRecorder(pool)
 	tokens := auth.NewTokens(cfg.JWTSecret)
-	svc := &dispatch.Service{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Recorder: recorder, TokenTTL: cfg.DriverTokenTTL}
+	svc := &dispatch.Service{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Recorder: recorder, TokenTTL: cfg.DriverTokenTTL,
+		WhatsApp: cfg.DispatchWhatsApp}
 	if err := svc.LoadActiveShifts(ctx); err != nil {
 		return err
 	}
@@ -128,11 +137,40 @@ func serve() error {
 		go func() { run(workers); done <- struct{}{} }()
 	}
 
+	localZone, err := time.LoadLocation(cfg.LocalTimeZone)
+	if err != nil {
+		stopWorkers()
+		return fmt.Errorf("ZONA_HORARIA: %w", err)
+	}
+	svc.Location = localZone // nothing reports before the HTTP server and the bot start below
+	var waHook *whatsapp.Webhook
+	if cfg.WhatsAppPhoneID != "" {
+		loc := localZone
+		bot := &whatsapp.Bot{
+			Store:    whatsapp.SQLStore{DB: pool},
+			Dispatch: svc,
+			Send:     whatsapp.NewClient(cfg.WhatsAppAPIBase, cfg.WhatsAppPhoneID, cfg.WhatsAppToken),
+			Location: loc,
+			Routes: func() []whatsapp.RouteInfo {
+				var out []whatsapp.RouteInfo
+				for _, r := range catalog.Routes() {
+					out = append(out, whatsapp.RouteInfo{ID: r.ID, Name: r.Name})
+				}
+				return out
+			},
+		}
+		svc.OnRamp = func(req live.RampRequest) int { return bot.NotifyRamp(workers, req) }
+		waHook = &whatsapp.Webhook{Bot: bot, VerifyToken: cfg.WhatsAppVerifyToken, AppSecret: cfg.WhatsAppAppSecret, Ctx: workers}
+		slog.Info("chatbot de WhatsApp habilitado", "numero", cfg.WhatsAppPhoneID)
+	}
+
 	ips := httpx.NewClientIP(cfg.TrustedProxies)
 	riderHandler := &riders.Handler{DB: pool, Tokens: tokens, TokenTTL: cfg.RiderTokenTTL}
 	handler := server.New(workers, server.Deps{
 		DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, IPs: ips, AllowedOrigins: cfg.AllowedOrigins, PanelDir: cfg.PanelDir,
-		Admin:  &admin.Handler{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, TokenTTL: cfg.AdminTokenTTL},
+		WhatsApp: waHook,
+		Admin: &admin.Handler{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, TokenTTL: cfg.AdminTokenTTL,
+			Location: localZone},
 		Riders: riderHandler,
 		Login:  &login.Handler{DB: pool, Tokens: tokens, Riders: riderHandler, DriverTTL: cfg.DriverTokenTTL},
 	})
@@ -249,5 +287,37 @@ func setDriverLogin(id, rawEmail, name string) error {
 		return fmt.Errorf("no existe el chofer %s (agrega su nombre para crearlo)", id)
 	}
 	fmt.Fprintln(os.Stderr, "Acceso actualizado para", id, "("+email+")")
+	return nil
+}
+
+// publishRoutes writes route GeoJSON files to the database, like PUT /api/v1/admin/routes but from the
+// server's shell (no panel login). A running API picks them up when restarted.
+func publishRoutes(files []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, err := db.Open(ctx, cfg.DSN())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	catalog := transit.NewCatalog(pool)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		r, err := transit.ParseRoute(data)
+		if err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+		if err := catalog.Upsert(ctx, r); err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+		fmt.Fprintf(os.Stderr, "Ruta publicada: %s (%s, %d paradas)\n", r.ID, r.Name, len(r.Stops))
+	}
 	return nil
 }

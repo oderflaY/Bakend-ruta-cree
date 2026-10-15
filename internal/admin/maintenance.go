@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -29,16 +30,97 @@ type maintenanceOrder struct {
 	OpenedAt    time.Time  `json:"openedAt"`
 	ClosedBy    *string    `json:"closedBy"`
 	ClosedAt    *time.Time `json:"closedAt"`
+	// Service order (Solicitud y autorización del servicio) fields.
+	Km        *int          `json:"km"`
+	Partida   string        `json:"partida"`
+	Recurso   string        `json:"recurso"`
+	Execution string        `json:"execution"`
+	Items     []serviceItem `json:"items"`
+}
+
+// serviceItem is one line of the service order: DESCRIPCIÓN DE LA SOLICITUD, UNIDAD, CANTIDAD.
+type serviceItem struct {
+	Description string `json:"description"`
+	Unit        string `json:"unit"`
+	Quantity    string `json:"quantity"`
+}
+
+// The printed form has room for four lines.
+const maxServiceItems = 4
+
+type serviceFields struct {
+	Km        *int          `json:"km"`
+	Partida   *string       `json:"partida"`
+	Recurso   *string       `json:"recurso"`
+	Execution *string       `json:"execution"`
+	Items     []serviceItem `json:"items"`
+}
+
+// sets validates the service-order fields present in the request and returns the SQL to store them.
+func (f serviceFields) sets() ([]string, []any, error) {
+	sets, args := []string{}, []any{}
+	if f.Km != nil {
+		if *f.Km < 0 || *f.Km > 9_999_999 {
+			return nil, nil, httpx.BadRequest("Kilometraje inválido")
+		}
+		sets, args = append(sets, "km = ?"), append(args, *f.Km)
+	}
+	for _, t := range []struct {
+		v     *string
+		col   string
+		field string
+	}{{f.Partida, "partida", "La partida"}, {f.Recurso, "recurso", "El recurso"}, {f.Execution, "execution", "La ejecución"}} {
+		if t.v == nil {
+			continue
+		}
+		v, err := cleanText(*t.v, 60, t.field)
+		if err != nil {
+			return nil, nil, err
+		}
+		sets, args = append(sets, t.col+" = ?"), append(args, v)
+	}
+	if f.Items != nil {
+		if len(f.Items) > maxServiceItems {
+			return nil, nil, httpx.BadRequest("La orden de servicio admite hasta 4 conceptos")
+		}
+		items := []serviceItem{}
+		for _, it := range f.Items {
+			d, err := cleanText(it.Description, 200, "La descripción del concepto")
+			if err != nil {
+				return nil, nil, err
+			}
+			u, err := cleanText(it.Unit, 20, "La unidad del concepto")
+			if err != nil {
+				return nil, nil, err
+			}
+			q, err := cleanText(it.Quantity, 20, "La cantidad del concepto")
+			if err != nil {
+				return nil, nil, err
+			}
+			if d != "" || u != "" || q != "" {
+				items = append(items, serviceItem{d, u, q})
+			}
+		}
+		raw, _ := json.Marshal(items)
+		sets, args = append(sets, "items = ?"), append(args, string(raw))
+	}
+	return sets, args, nil
 }
 
 const maintenanceQuery = `SELECT m.id, m.bus_id, b.number, m.kind, m.description, m.notes,
-	oa.username, m.opened_at, ca.username, m.closed_at
+	oa.username, m.opened_at, ca.username, m.closed_at, m.km, m.partida, m.recurso, m.execution, m.items
 	FROM maintenance_orders m JOIN buses b ON b.id = m.bus_id
 	LEFT JOIN admins oa ON oa.id = m.opened_by LEFT JOIN admins ca ON ca.id = m.closed_by`
 
 func scanMaintenance(sc interface{ Scan(...any) error }) (maintenanceOrder, error) {
 	var o maintenanceOrder
-	err := sc.Scan(&o.ID, &o.BusID, &o.BusNumber, &o.Kind, &o.Description, &o.Notes, &o.OpenedBy, &o.OpenedAt, &o.ClosedBy, &o.ClosedAt)
+	var items []byte
+	err := sc.Scan(&o.ID, &o.BusID, &o.BusNumber, &o.Kind, &o.Description, &o.Notes, &o.OpenedBy, &o.OpenedAt, &o.ClosedBy, &o.ClosedAt,
+		&o.Km, &o.Partida, &o.Recurso, &o.Execution, &items)
+	if err == nil {
+		o.Items = []serviceItem{}
+		_ = json.Unmarshal(items, &o.Items)
+	}
 	return o, err
 }
 
@@ -108,12 +190,14 @@ func cleanText(s string, max int, field string) (string, error) {
 	return s, nil
 }
 
-// OpenMaintenance is POST /api/v1/admin/maintenance {"busId", "kind", "description"}.
+// OpenMaintenance is POST /api/v1/admin/maintenance {"busId", "kind", "description", "km"?, "partida"?,
+// "recurso"?, "execution"?, "items"?}: the last ones fill the printed service order.
 func (h *Handler) OpenMaintenance(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		BusID       uint64 `json:"busId"`
 		Kind        string `json:"kind"`
 		Description string `json:"description"`
+		serviceFields
 	}
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
@@ -127,6 +211,14 @@ func (h *Handler) OpenMaintenance(w http.ResponseWriter, r *http.Request) error 
 	}
 	if desc == "" {
 		return httpx.BadRequest("Describe qué se le va a hacer a la unidad")
+	}
+	if req.Items == nil {
+		// The request itself is the first line of the service order.
+		req.Items = []serviceItem{{Description: desc, Unit: "SERVICIO", Quantity: "1"}}
+	}
+	sets, setArgs, err := req.serviceFields.sets()
+	if err != nil {
+		return err
 	}
 	ctx := r.Context()
 	b, err := h.loadBus(ctx, req.BusID)
@@ -149,6 +241,12 @@ func (h *Handler) OpenMaintenance(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	id, _ := res.LastInsertId()
+	if len(sets) > 0 {
+		if _, err := h.DB.ExecContext(ctx, `UPDATE maintenance_orders SET `+strings.Join(sets, ", ")+` WHERE id = ?`,
+			append(setArgs, id)...); err != nil {
+			return err
+		}
+	}
 	if b.Status != "workshop" {
 		if err := h.setBusStatus(ctx, b.ID, "workshop"); err != nil {
 			return err
@@ -163,7 +261,8 @@ func (h *Handler) OpenMaintenance(w http.ResponseWriter, r *http.Request) error 
 	return nil
 }
 
-// UpdateMaintenance is PATCH /api/v1/admin/maintenance/{id} {"notes"?, "close"?: true, "date"?: "YYYY-MM-DD"}.
+// UpdateMaintenance is PATCH /api/v1/admin/maintenance/{id} {"notes"?, "close"?: true, "date"?: "YYYY-MM-DD",
+// plus the service-order fields ("km", "partida", "recurso", "execution", "items"), editable while open.
 // Closing releases the bus (status active, ramp working) and sets its last maintenance to date
 // (default: today in the server's calendar).
 func (h *Handler) UpdateMaintenance(w http.ResponseWriter, r *http.Request) error {
@@ -171,6 +270,7 @@ func (h *Handler) UpdateMaintenance(w http.ResponseWriter, r *http.Request) erro
 		Notes *string `json:"notes"`
 		Close bool    `json:"close"`
 		Date  string  `json:"date"`
+		serviceFields
 	}
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
@@ -196,6 +296,16 @@ func (h *Handler) UpdateMaintenance(w http.ResponseWriter, r *http.Request) erro
 			return err
 		}
 	}
+	sets, setArgs, err := req.serviceFields.sets()
+	if err != nil {
+		return err
+	}
+	if len(sets) > 0 {
+		if _, err := h.DB.ExecContext(ctx, `UPDATE maintenance_orders SET `+strings.Join(sets, ", ")+` WHERE id = ?`,
+			append(setArgs, id)...); err != nil {
+			return err
+		}
+	}
 	if req.Close {
 		day := req.Date
 		if day == "" {
@@ -218,8 +328,8 @@ func (h *Handler) UpdateMaintenance(w http.ResponseWriter, r *http.Request) erro
 			return err
 		}
 		h.audit(r, "cerró la orden de mantenimiento de la Unidad %s y la liberó", o.BusNumber)
-	} else if req.Notes != nil {
-		h.audit(r, "anotó en la orden de mantenimiento de la Unidad %s", o.BusNumber)
+	} else if req.Notes != nil || len(sets) > 0 {
+		h.audit(r, "editó la orden de mantenimiento de la Unidad %s", o.BusNumber)
 	}
 	o, err = h.loadMaintenance(ctx, id)
 	if err != nil {

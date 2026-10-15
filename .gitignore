@@ -4,3 +4,4 @@ secrets/
 *.test
 respaldos/
 /panel
+scripts/rutas-cas/datos/

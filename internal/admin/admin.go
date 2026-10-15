@@ -30,6 +30,8 @@ type Handler struct {
 	Tokens   *auth.Tokens
 	Dispatch *dispatch.Service
 	TokenTTL time.Duration
+	// Local time zone of the printed forms (dates and trip times).
+	Location *time.Location
 }
 
 // EnsureAdmin creates the first admin from ADMIN_EMAIL / ADMIN_PASSWORD when there is none.
@@ -167,6 +169,62 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) error {
 func (h *Handler) ActiveShifts(w http.ResponseWriter, r *http.Request) error {
 	httpx.WriteJSON(w, http.StatusOK, h.Hub.ActiveShifts())
 	return nil
+}
+
+type trip struct {
+	ShiftID       uint64     `json:"shiftId"`
+	DriverID      string     `json:"driverId"`
+	DriverName    string     `json:"driverName"`
+	BusNumber     string     `json:"busNumber"`
+	RouteID       string     `json:"routeId"`
+	StartedAt     time.Time  `json:"startedAt"`
+	EndedAt       *time.Time `json:"endedAt"`
+	EndReason     *string    `json:"endReason"`
+	FinalLocation *string    `json:"finalLocation"`
+	Disability    *int       `json:"disability"`
+	Elderly       *int       `json:"elderly"`
+	Pregnant      *int       `json:"pregnant"`
+	Companions    *int       `json:"companions"`
+	Men           *int       `json:"men"`
+	Women         *int       `json:"women"`
+	// Trips logged by older apps (before the DIF's categories).
+	Children *int `json:"children"`
+	Adults   *int `json:"adults"`
+}
+
+// ListShifts is GET /api/v1/admin/shifts?from=RFC3339&to=RFC3339: the routes driven in that window
+// (by start time), with when each began and ended and the passengers the driver counted at the start.
+func (h *Handler) ListShifts(w http.ResponseWriter, r *http.Request) error {
+	from, err := time.Parse(time.RFC3339, r.URL.Query().Get("from"))
+	if err != nil {
+		return httpx.BadRequest("from debe ser una fecha RFC3339")
+	}
+	to, err := time.Parse(time.RFC3339, r.URL.Query().Get("to"))
+	if err != nil || !to.After(from) {
+		return httpx.BadRequest("to debe ser una fecha RFC3339 posterior a from")
+	}
+	rows, err := h.DB.QueryContext(r.Context(), `SELECT s.id, s.driver_id, d.name, b.number, s.route_id, s.started_at,
+		s.ended_at, s.end_reason, s.final_location, s.disability, s.elderly, s.pregnant, s.companions, s.men,
+		s.women, s.children, s.adults
+		FROM shifts s JOIN drivers d ON d.id = s.driver_id JOIN buses b ON b.id = s.bus_id
+		WHERE s.started_at >= ? AND s.started_at < ? ORDER BY s.started_at DESC LIMIT ?`,
+		from.UTC(), to.UTC(), limitParam(r))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	out := []trip{}
+	for rows.Next() {
+		var t trip
+		if err := rows.Scan(&t.ShiftID, &t.DriverID, &t.DriverName, &t.BusNumber, &t.RouteID, &t.StartedAt,
+			&t.EndedAt, &t.EndReason, &t.FinalLocation, &t.Disability, &t.Elderly, &t.Pregnant, &t.Companions, &t.Men,
+			&t.Women, &t.Children, &t.Adults); err != nil {
+			return err
+		}
+		out = append(out, t)
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+	return rows.Err()
 }
 
 // ---- drivers ----
@@ -394,17 +452,19 @@ type bus struct {
 	ID              uint64    `json:"id"`
 	Number          string    `json:"number"`
 	Plates          string    `json:"plates"`
+	Brand           string    `json:"brand"`
+	Model           string    `json:"model"`
 	Status          BusStatus `json:"status"`
 	LastMaintenance *string   `json:"lastMaintenance"`
 	Ramp            bool      `json:"rampOperational"`
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
-const busColumns = `id, number, plates, status, DATE_FORMAT(last_maintenance, '%Y-%m-%d'), ramp_operational, created_at`
+const busColumns = `id, number, plates, brand, model, status, DATE_FORMAT(last_maintenance, '%Y-%m-%d'), ramp_operational, created_at`
 
 func scanBus(sc interface{ Scan(...any) error }) (bus, error) {
 	var b bus
-	err := sc.Scan(&b.ID, &b.Number, &b.Plates, &b.Status, &b.LastMaintenance, &b.Ramp, &b.CreatedAt)
+	err := sc.Scan(&b.ID, &b.Number, &b.Plates, &b.Brand, &b.Model, &b.Status, &b.LastMaintenance, &b.Ramp, &b.CreatedAt)
 	return b, err
 }
 
@@ -417,7 +477,7 @@ func (h *Handler) loadBus(ctx context.Context, id uint64) (bus, error) {
 }
 
 func (h *Handler) ListBuses(w http.ResponseWriter, r *http.Request) error {
-	rows, err := h.DB.QueryContext(r.Context(), `SELECT `+busColumns+` FROM buses ORDER BY LPAD(number, 8, '0')`)
+	rows, err := h.DB.QueryContext(r.Context(), `SELECT `+busColumns+` FROM buses ORDER BY LPAD(number, 16, '0')`)
 	if err != nil {
 		return err
 	}
@@ -436,6 +496,15 @@ func (h *Handler) ListBuses(w http.ResponseWriter, r *http.Request) error {
 
 var platesPattern = regexp.MustCompile(`^[A-Z0-9-]{0,16}$`)
 
+// cleanLabel normalizes a short free-text bus field (brand, model) to upper case, as on the forms.
+func cleanLabel(s, field string) (string, error) {
+	s = strings.ToUpper(strings.Join(strings.Fields(s), " "))
+	if utf8.RuneCountInString(s) > 40 {
+		return "", httpx.BadRequest(field + " demasiado largo (máx. 40)")
+	}
+	return s, nil
+}
+
 func cleanPlates(p string) (string, error) {
 	p = strings.ToUpper(strings.TrimSpace(p))
 	if !platesPattern.MatchString(p) {
@@ -444,25 +513,36 @@ func cleanPlates(p string) (string, error) {
 	return p, nil
 }
 
-// CreateBus is POST /api/v1/admin/buses {"number", "plates"?}. Buses are also created on the fly when
+// CreateBus is POST /api/v1/admin/buses {"number", "plates"?, "brand"?, "model"?}. Buses are also created on the fly when
 // a driver opens a shift on a new number; this lets the fleet be registered beforehand.
 func (h *Handler) CreateBus(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		Number string `json:"number"`
 		Plates string `json:"plates"`
+		Brand  string `json:"brand"`
+		Model  string `json:"model"`
 	}
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
 	}
 	number := strings.ToUpper(strings.TrimSpace(req.Number))
 	if !dispatch.BusNumberPattern.MatchString(number) {
-		return httpx.BadRequest("Número de unidad inválido (1 a 8 letras o números)")
+		return httpx.BadRequest("Número de unidad inválido (hasta 16 letras, números o guiones)")
 	}
 	plates, err := cleanPlates(req.Plates)
 	if err != nil {
 		return err
 	}
-	res, err := h.DB.ExecContext(r.Context(), `INSERT INTO buses (number, plates) VALUES (?, ?)`, number, plates)
+	brand, err := cleanLabel(req.Brand, "La marca")
+	if err != nil {
+		return err
+	}
+	model, err := cleanLabel(req.Model, "El modelo")
+	if err != nil {
+		return err
+	}
+	res, err := h.DB.ExecContext(r.Context(), `INSERT INTO buses (number, plates, brand, model) VALUES (?, ?, ?, ?)`,
+		number, plates, brand, model)
 	if me, ok := errors.AsType[*mysql.MySQLError](err); ok && me.Number == 1062 {
 		return httpx.NewError(http.StatusConflict, "exists", "Ya existe esa unidad")
 	}
@@ -479,12 +559,14 @@ func (h *Handler) CreateBus(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// UpdateBus is PATCH /api/v1/admin/buses/{id} {"status"?, "plates"?, "lastMaintenance"?: "YYYY-MM-DD"|"",
+// UpdateBus is PATCH /api/v1/admin/buses/{id} {"status"?, "plates"?, "brand"?, "model"?, "lastMaintenance"?: "YYYY-MM-DD"|"",
 // "rampOperational"?}. Ramp changes reach riders within a second; "workshop" closes the bus's shift.
 func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		Status          *BusStatus `json:"status"`
 		Plates          *string    `json:"plates"`
+		Brand           *string    `json:"brand"`
+		Model           *string    `json:"model"`
 		LastMaintenance *string    `json:"lastMaintenance"`
 		Ramp            *bool      `json:"rampOperational"`
 	}
@@ -524,6 +606,20 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		sets, args, changes = append(sets, "plates = ?"), append(args, p), append(changes, "placas")
+	}
+	if req.Brand != nil {
+		v, err := cleanLabel(*req.Brand, "La marca")
+		if err != nil {
+			return err
+		}
+		sets, args, changes = append(sets, "brand = ?"), append(args, v), append(changes, "marca")
+	}
+	if req.Model != nil {
+		v, err := cleanLabel(*req.Model, "El modelo")
+		if err != nil {
+			return err
+		}
+		sets, args, changes = append(sets, "model = ?"), append(args, v), append(changes, "modelo")
 	}
 	if req.LastMaintenance != nil {
 		var day any

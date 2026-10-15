@@ -16,6 +16,7 @@ import (
 	"github.com/eter/rutacree-backend/internal/login"
 	riderapi "github.com/eter/rutacree-backend/internal/riders"
 	"github.com/eter/rutacree-backend/internal/transit"
+	"github.com/eter/rutacree-backend/internal/whatsapp"
 )
 
 type Deps struct {
@@ -31,6 +32,8 @@ type Deps struct {
 	AllowedOrigins []string
 	// Folder with the control panel's static files; empty = not served.
 	PanelDir string
+	// Drivers' WhatsApp chatbot; nil when not configured.
+	WhatsApp *whatsapp.Webhook
 }
 
 func New(ctx context.Context, d Deps) http.Handler {
@@ -102,6 +105,12 @@ func New(ctx context.Context, d Deps) http.Handler {
 	mux.Handle("POST /api/v1/driver/ramp-requests/{id}/ack", with(h(d.Dispatch.AckRamp), general, driver))
 	mux.Handle("GET /api/v1/driver/socket", with(socket.ServeDriver(d.Dispatch.PendingRamps), sockets, driver))
 
+	// Drivers' WhatsApp chatbot: Meta calls this URL (signed with the app secret).
+	if d.WhatsApp != nil {
+		mux.Handle("GET /api/whatsapp/webhook", with(http.HandlerFunc(d.WhatsApp.Verify), general))
+		mux.Handle("POST /api/whatsapp/webhook", with(http.HandlerFunc(d.WhatsApp.Receive), general))
+	}
+
 	// Admin dashboard. Every route names the panel roles allowed to use it (see admin.Role).
 	a := d.Admin
 	mux.Handle("POST /api/v1/admin/login", with(h(a.Login), loginLimit))
@@ -117,6 +126,7 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"GET /api/v1/admin/me", a.Me, all},
 		{"GET /api/v1/admin/overview", a.Overview, all},
 		{"GET /api/v1/admin/shifts/active", a.ActiveShifts, desk},
+		{"GET /api/v1/admin/shifts", a.ListShifts, desk},
 		{"GET /api/v1/admin/drivers", a.ListDrivers, desk},
 		{"POST /api/v1/admin/drivers", a.CreateDriver, sa},
 		{"PATCH /api/v1/admin/drivers/{id}", a.UpdateDriver, sa},
@@ -145,6 +155,15 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"GET /api/v1/admin/maintenance", a.ListMaintenance, fleet},
 		{"POST /api/v1/admin/maintenance", a.OpenMaintenance, fleet},
 		{"PATCH /api/v1/admin/maintenance/{id}", a.UpdateMaintenance, fleet},
+		{"GET /api/v1/admin/maintenance/{id}/orden", a.OrdenServicio, fleet},
+		{"GET /api/v1/admin/vehicle-reports", a.ListVehicleReports, all},
+		{"POST /api/v1/admin/vehicle-reports", a.CreateVehicleReport, all},
+		{"GET /api/v1/admin/vehicle-reports/{id}/xlsx", a.VehicleReportXLSX, all},
+		{"GET /api/v1/admin/formatos/bitacora", a.Bitacora, desk},
+		// The DIF's forms, editable in the panel; each kind checks its own roles.
+		{"GET /api/v1/admin/formatos/{kind}/{ref}", a.GetForm, all},
+		{"PUT /api/v1/admin/formatos/{kind}/{ref}", a.SaveForm, all},
+		{"GET /api/v1/admin/formatos/{kind}/{ref}/xlsx", a.FormXLSX, all},
 	} {
 		mux.Handle(rt.pattern, with(h(rt.fn), general, adm, a.Allow(rt.roles...)))
 	}

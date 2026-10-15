@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // the image has no zoneinfo; the bot writes local times
 
 	"github.com/eter/rutacree-backend/internal/admin"
 	"github.com/eter/rutacree-backend/internal/auth"
@@ -32,6 +33,7 @@ import (
 	"github.com/eter/rutacree-backend/internal/server"
 	"github.com/eter/rutacree-backend/internal/traccar"
 	"github.com/eter/rutacree-backend/internal/transit"
+	"github.com/eter/rutacree-backend/internal/whatsapp"
 )
 
 func main() {
@@ -100,7 +102,8 @@ func serve() error {
 	hub := live.NewHub(cfg.MaxSocketClients)
 	recorder := live.NewRecorder(pool)
 	tokens := auth.NewTokens(cfg.JWTSecret)
-	svc := &dispatch.Service{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Recorder: recorder, TokenTTL: cfg.DriverTokenTTL}
+	svc := &dispatch.Service{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Recorder: recorder, TokenTTL: cfg.DriverTokenTTL,
+		WhatsApp: cfg.DispatchWhatsApp}
 	if err := svc.LoadActiveShifts(ctx); err != nil {
 		return err
 	}
@@ -128,11 +131,39 @@ func serve() error {
 		go func() { run(workers); done <- struct{}{} }()
 	}
 
+	localZone, err := time.LoadLocation(cfg.LocalTimeZone)
+	if err != nil {
+		stopWorkers()
+		return fmt.Errorf("ZONA_HORARIA: %w", err)
+	}
+	var waHook *whatsapp.Webhook
+	if cfg.WhatsAppPhoneID != "" {
+		loc := localZone
+		bot := &whatsapp.Bot{
+			Store:    whatsapp.SQLStore{DB: pool},
+			Dispatch: svc,
+			Send:     whatsapp.NewClient(cfg.WhatsAppAPIBase, cfg.WhatsAppPhoneID, cfg.WhatsAppToken),
+			Location: loc,
+			Routes: func() []whatsapp.RouteInfo {
+				var out []whatsapp.RouteInfo
+				for _, r := range catalog.Routes() {
+					out = append(out, whatsapp.RouteInfo{ID: r.ID, Name: r.Name})
+				}
+				return out
+			},
+		}
+		svc.OnRamp = func(req live.RampRequest) int { return bot.NotifyRamp(workers, req) }
+		waHook = &whatsapp.Webhook{Bot: bot, VerifyToken: cfg.WhatsAppVerifyToken, AppSecret: cfg.WhatsAppAppSecret, Ctx: workers}
+		slog.Info("chatbot de WhatsApp habilitado", "numero", cfg.WhatsAppPhoneID)
+	}
+
 	ips := httpx.NewClientIP(cfg.TrustedProxies)
 	riderHandler := &riders.Handler{DB: pool, Tokens: tokens, TokenTTL: cfg.RiderTokenTTL}
 	handler := server.New(workers, server.Deps{
 		DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, IPs: ips, AllowedOrigins: cfg.AllowedOrigins, PanelDir: cfg.PanelDir,
-		Admin:  &admin.Handler{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, TokenTTL: cfg.AdminTokenTTL},
+		WhatsApp: waHook,
+		Admin: &admin.Handler{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, TokenTTL: cfg.AdminTokenTTL,
+			Location: localZone},
 		Riders: riderHandler,
 		Login:  &login.Handler{DB: pool, Tokens: tokens, Riders: riderHandler, DriverTTL: cfg.DriverTokenTTL},
 	})

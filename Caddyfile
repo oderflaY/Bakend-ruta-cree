@@ -21,3 +21,21 @@
 		}
 	}
 }
+
+# Fued (otra app, stack propio en /root/fued con deploy/docker-compose.yml del repo de Fued).
+# Caddy sólo le da HTTPS; si Fued está apagado, RutaCree no se entera.
+fued.{$DOMAIN} {
+	encode zstd gzip
+
+	header Strict-Transport-Security "max-age=63072000"
+	header -Server
+
+	# Adjuntos del chat de hasta 8 MB.
+	request_body {
+		max_size 12MB
+	}
+
+	reverse_proxy fued-app:80 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

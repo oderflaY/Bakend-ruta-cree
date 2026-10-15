@@ -50,7 +50,29 @@ docker compose --profile https up -d
 
 Caddy obtiene y renueva el certificado solo. La app debe usar `wss://` y `https://` en producción.
 
-## Traccar: el teléfono del chofer como GPS del camión
+## Chofer: GPS en el camión y avisos por WhatsApp
+
+El teléfono del chofer **ya no manda su ubicación**: cada camión lleva su propio GPS que reporta a
+Traccar (protocolo OsmAnd, puerto 5055) con el **número de unidad** como identificador. La app del chofer
+solo sirve para:
+
+- **Iniciar la ruta**: unidad, ruta y cuántos pasajeros suben (niños, adultos, mujeres). Se guarda la hora
+  de inicio en `shifts.started_at` y los conteos en `shifts.children/adults/women`.
+- **Fallas**: falla de rampa (`ramp_failure`: la unidad sigue en ruta, queda como *Rampa dañada* y los
+  pasajeros reciben el aviso), falla del camión o choque (cierran el turno y avisan a los pasajeros).
+- **Terminar la ruta**: se guarda la hora de fin.
+- Recibir las solicitudes de rampa de los pasajeros.
+
+Cada uno de esos avisos abre WhatsApp con el mensaje listo para el despacho; el número se configura en
+`WHATSAPP_DESPACHO` (`.env`, solo dígitos con lada: `521618…`). Vacío, WhatsApp deja elegir el chat o grupo.
+En el panel, **Turnos y Flotilla → Bitácora de viajes** muestra inicio, fin, duración y pasajeros de cada
+ruta del día (`GET /api/v1/admin/shifts?from=…&to=…`, fechas RFC3339).
+
+## Traccar: GPS de los camiones
+
+> Lo que sigue describe Traccar Client en el teléfono del chofer, que era el esquema anterior. Con el GPS
+> del camión aplica igual: el dispositivo se configura con el número de unidad como identificador y
+> `TRACCAR_PUBLIC_OSMAND_URL` como servidor. Solo cuentan sus posiciones mientras la ruta está iniciada.
 
 El stack incluye Traccar 6.9 (servicio `traccar`, base de datos propia `traccar` en el mismo MariaDB).
 El teléfono del chofer usa la app oficial **Traccar Client** (Android/iOS), que sigue enviando la
@@ -118,8 +140,11 @@ Para HTTP sin TLS en desarrollo, Android exige permitir cleartext para esa IP
 El chofer entra por el mismo login que los pasajeros (`POST /api/v1/auth/login` → `role: "driver"`).
 
 1. **Iniciar turno** con el token del login:
-   `POST /api/v1/driver/shifts` `{"busNumber":"245","routeId":"ruta-2"}` →
-   `{"token":"…","shiftId":…,"busId":…,"expiresAt":"…"}`. Ese token de turno se guarda solo en memoria.
+   `POST /api/v1/driver/shifts` `{"busNumber":"245","routeId":"ruta-2","children":4,"adults":2,"women":1}` →
+   `{"token":"…","shiftId":…,"busId":…,"expiresAt":"…","startedAt":"…","whatsapp":"521…"}`. Los conteos
+   (0 a 99) son opcionales para apps viejas. Ese token de turno se guarda solo en memoria.
+   Fallas: `POST /api/v1/driver/incidents {"type":"accident"|"breakdown"|"ramp_failure"}`. Cierre:
+   `POST /api/v1/driver/shifts/end {"finalLocation"}` → `{"startedAt","endedAt"}`.
 2. **Reportar posición**: `sendReport()` puede seguir igual, apuntando
    `TRACCAR_REPORT_URL=http://IP:8080/api/v1/driver/osmand` y añadiendo la cabecera
    `Authorization: Bearer <token>`. Los parámetros `alarm=accident|fault` y

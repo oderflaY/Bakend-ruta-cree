@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 )
 
 var (
-	BusNumberPattern = regexp.MustCompile(`^[A-Z0-9]{1,8}$`)
+	BusNumberPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9-]{0,15}$`)
 	DriverIDPattern  = regexp.MustCompile(`^[A-Z0-9-]{1,16}$`)
 )
 
@@ -47,6 +48,10 @@ type Service struct {
 	TokenTTL time.Duration
 	// Nil when Traccar is not configured: the app's own GPS reports are the only source.
 	Tracker Tracker
+	// Dispatch's WhatsApp number, where the driver's app sends route start/end and failures.
+	WhatsApp string
+	// Also told about every new ramp request (the WhatsApp bot); returns how many drivers it reached.
+	OnRamp func(live.RampRequest) int
 }
 
 // LoadActiveShifts restores open shifts into the hub after a restart.
@@ -72,11 +77,30 @@ func (s *Service) LoadActiveShifts(ctx context.Context) error {
 
 // ---- shifts ----
 
+// Most passengers a bus can carry; counts above this are typing mistakes.
+const maxPassengers = 99
+
 type startShiftReq struct {
 	BusNumber string `json:"busNumber"`
 	RouteID   string `json:"routeId"`
-	DriverID  string `json:"-"`
+	// Users of this trip (vuelta), as the DIF's weekly log counts them. Optional for older apps,
+	// which send children/adults/women instead.
+	Disability *int   `json:"disability"`
+	Elderly    *int   `json:"elderly"`
+	Pregnant   *int   `json:"pregnant"`
+	Companions *int   `json:"companions"`
+	Men        *int   `json:"men"`
+	Women      *int   `json:"women"`
+	Children   *int   `json:"children"`
+	Adults     *int   `json:"adults"`
+	DriverID   string `json:"-"`
 }
+
+func (r startShiftReq) counts() []*int {
+	return []*int{r.Disability, r.Elderly, r.Pregnant, r.Companions, r.Men, r.Women, r.Children, r.Adults}
+}
+
+func validCount(n *int) bool { return n == nil || (*n >= 0 && *n <= maxPassengers) }
 
 type startShiftResp struct {
 	Token           string    `json:"token"`
@@ -90,8 +114,11 @@ type startShiftResp struct {
 	// "traccar" when the bus position should come from Traccar Client on the driver's phone.
 	PositionSource string `json:"positionSource"`
 	// What to type in Traccar Client: device identifier (the bus number) and server URL.
-	TrackerDeviceID string `json:"trackerDeviceId,omitempty"`
-	TrackerURL      string `json:"trackerUrl,omitempty"`
+	TrackerDeviceID string    `json:"trackerDeviceId,omitempty"`
+	TrackerURL      string    `json:"trackerUrl,omitempty"`
+	StartedAt       time.Time `json:"startedAt"`
+	// Dispatch's WhatsApp (digits only); empty lets the driver pick the chat.
+	WhatsApp string `json:"whatsapp"`
 }
 
 // StartShift is POST /api/v1/driver/shifts {"busNumber", "routeId"} with the driver's login token
@@ -101,46 +128,13 @@ func (s *Service) StartShift(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	req.BusNumber = strings.ToUpper(strings.TrimSpace(req.BusNumber))
-	if !BusNumberPattern.MatchString(req.BusNumber) {
-		return httpx.BadRequest("Número de unidad inválido (1 a 8 letras o números)")
-	}
-	var busStatus string
-	switch err := s.DB.QueryRowContext(r.Context(), `SELECT status FROM buses WHERE number = ?`, req.BusNumber).Scan(&busStatus); {
-	case err == nil && busStatus == "workshop":
-		return httpx.NewError(http.StatusConflict, "bus_in_workshop", "La unidad está en el taller; avisa al despacho")
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return err
-	}
-	if _, ok := s.Catalog.Route(req.RouteID); !ok {
-		return httpx.BadRequest("Ruta desconocida")
-	}
-
-	// The driver signed in with email and password (driver_account token); re-check they're still active.
-	ctx := r.Context()
-	driverID := auth.FromContext(ctx).Subject
-	var (
-		name   string
-		active bool
-	)
-	err := s.DB.QueryRowContext(ctx, `SELECT name, active FROM drivers WHERE id = ?`, driverID).Scan(&name, &active)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && !active) {
-		return httpx.ErrUnauthorized
-	}
+	// The driver signed in with email and password (driver_account token).
+	req.DriverID = auth.FromContext(r.Context()).Subject
+	st, err := s.Begin(r.Context(), req)
 	if err != nil {
 		return err
 	}
-	req.DriverID = driverID
-
-	shift, replaced, err := s.openShift(ctx, req.DriverID, req.BusNumber, req.RouteID)
-	if err != nil {
-		return err
-	}
-	for _, id := range replaced {
-		s.Hub.RemoveShift(id)
-	}
-	s.Hub.AddShift(shift)
-
+	shift := st.Shift
 	token, exp, err := s.Tokens.Issue(auth.Claims{
 		Role: auth.RoleDriver, ShiftID: shift.ID, BusID: shift.BusID, RouteID: shift.RouteID,
 		RegisteredClaims: auth.Subject(req.DriverID),
@@ -150,57 +144,121 @@ func (s *Service) StartShift(w http.ResponseWriter, r *http.Request) error {
 	}
 	resp := startShiftResp{
 		Token: token, ExpiresAt: exp, ShiftID: shift.ID, BusID: shift.BusID, BusNumber: shift.BusNumber,
-		RouteID: shift.RouteID, DriverName: name, RampOperational: shift.Ramp, PositionSource: "app",
+		RouteID: shift.RouteID, DriverName: st.DriverName, RampOperational: shift.Ramp, PositionSource: "app",
+		StartedAt: st.StartedAt, WhatsApp: s.WhatsApp,
 	}
 	if s.Tracker != nil {
 		resp.PositionSource = "traccar"
 		resp.TrackerDeviceID = shift.BusNumber
 		resp.TrackerURL = s.Tracker.PublicURL()
-		// Best effort: the shift is valid even if Traccar is down; the app's GPS covers meanwhile.
+	}
+	httpx.WriteJSON(w, http.StatusCreated, resp)
+	return nil
+}
+
+// Started is a shift just opened by Begin.
+type Started struct {
+	Shift      live.Shift
+	StartedAt  time.Time
+	DriverName string
+}
+
+// StartRequest is what opening a shift needs, from the app or from the WhatsApp bot.
+type StartRequest = startShiftReq
+
+// Begin validates and opens a shift for an active driver: the core of StartShift, shared with the
+// WhatsApp bot. Errors are *httpx.Error with a message fit to show the driver.
+func (s *Service) Begin(ctx context.Context, req startShiftReq) (Started, error) {
+	req.BusNumber = strings.ToUpper(strings.TrimSpace(req.BusNumber))
+	if !BusNumberPattern.MatchString(req.BusNumber) {
+		return Started{}, httpx.BadRequest("Número de unidad inválido (hasta 16 letras, números o guiones)")
+	}
+	var busStatus string
+	switch err := s.DB.QueryRowContext(ctx, `SELECT status FROM buses WHERE number = ?`, req.BusNumber).Scan(&busStatus); {
+	case err == nil && busStatus == "workshop":
+		return Started{}, httpx.NewError(http.StatusConflict, "bus_in_workshop", "La unidad está en el taller; avisa al despacho")
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return Started{}, err
+	}
+	if _, ok := s.Catalog.Route(req.RouteID); !ok {
+		return Started{}, httpx.BadRequest("Ruta desconocida")
+	}
+	for _, n := range req.counts() {
+		if !validCount(n) {
+			return Started{}, httpx.BadRequest(fmt.Sprintf("Las cantidades de pasajeros van de 0 a %d", maxPassengers))
+		}
+	}
+
+	// Re-check the driver is still active.
+	var (
+		name   string
+		active bool
+	)
+	err := s.DB.QueryRowContext(ctx, `SELECT name, active FROM drivers WHERE id = ?`, req.DriverID).Scan(&name, &active)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !active) {
+		return Started{}, httpx.ErrUnauthorized
+	}
+	if err != nil {
+		return Started{}, err
+	}
+
+	shift, startedAt, replaced, err := s.openShift(ctx, req)
+	if err != nil {
+		return Started{}, err
+	}
+	for _, id := range replaced {
+		s.Hub.RemoveShift(id)
+	}
+	s.Hub.AddShift(shift)
+	if s.Tracker != nil {
+		// Best effort: the shift is valid even if Traccar is down.
 		tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := s.Tracker.EnsureDevice(tctx, shift.BusNumber); err != nil {
 			slog.Warn("no se registró la unidad en Traccar", "unidad", shift.BusNumber, "error", err)
 		}
 		cancel()
 	}
-	slog.Info("turno iniciado", "turno", shift.ID, "chofer", req.DriverID, "unidad", req.BusNumber, "ruta", req.RouteID)
-	httpx.WriteJSON(w, http.StatusCreated, resp)
-	return nil
+	slog.Info("turno iniciado", "turno", shift.ID, "chofer", req.DriverID, "unidad", req.BusNumber, "ruta", req.RouteID,
+		"discapacidad", req.Disability, "adultos_mayores", req.Elderly, "embarazadas", req.Pregnant,
+		"acompanantes", req.Companions, "hombres", req.Men, "mujeres", req.Women)
+	return Started{Shift: shift, StartedAt: startedAt, DriverName: name}, nil
 }
 
 // openShift closes any open shift of this driver or this bus ("replaced") and opens a new one.
-func (s *Service) openShift(ctx context.Context, driverID, busNumber, routeID string) (live.Shift, []uint64, error) {
+func (s *Service) openShift(ctx context.Context, req startShiftReq) (live.Shift, time.Time, []uint64, error) {
+	var startedAt time.Time
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return live.Shift{}, nil, err
+		return live.Shift{}, startedAt, nil, err
 	}
 	defer tx.Rollback()
+	driverID, busNumber, routeID := req.DriverID, req.BusNumber, req.RouteID
 
 	sh := live.Shift{DriverID: driverID, BusNumber: busNumber, RouteID: routeID}
 	res, err := tx.ExecContext(ctx, `INSERT INTO buses (number) VALUES (?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`, busNumber)
 	if err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 	busID, err := res.LastInsertId()
 	if err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 	sh.BusID = uint64(busID)
 	if err := tx.QueryRowContext(ctx, `SELECT ramp_operational FROM buses WHERE id = ?`, sh.BusID).Scan(&sh.Ramp); err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM shifts WHERE ended_at IS NULL AND (driver_id = ? OR bus_id = ?) FOR UPDATE`,
 		driverID, sh.BusID)
 	if err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 	var replaced []uint64
 	for rows.Next() {
 		var id uint64
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return sh, nil, err
+			return sh, startedAt, nil, err
 		}
 		replaced = append(replaced, id)
 	}
@@ -208,25 +266,32 @@ func (s *Service) openShift(ctx context.Context, driverID, busNumber, routeID st
 	if len(replaced) > 0 {
 		if _, err := tx.ExecContext(ctx, `UPDATE shifts SET ended_at = CURRENT_TIMESTAMP(3), end_reason = 'replaced'
 			WHERE ended_at IS NULL AND (driver_id = ? OR bus_id = ?)`, driverID, sh.BusID); err != nil {
-			return sh, nil, err
+			return sh, startedAt, nil, err
 		}
 	}
 
-	res, err = tx.ExecContext(ctx, `INSERT INTO shifts (driver_id, bus_id, route_id) VALUES (?, ?, ?)`, driverID, sh.BusID, routeID)
+	res, err = tx.ExecContext(ctx, `INSERT INTO shifts (driver_id, bus_id, route_id, disability, elderly, pregnant,
+		companions, men, women, children, adults) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		driverID, sh.BusID, routeID, req.Disability, req.Elderly, req.Pregnant, req.Companions, req.Men, req.Women,
+		req.Children, req.Adults)
 	if err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
-		return sh, nil, err
+		return sh, startedAt, nil, err
 	}
 	sh.ID = uint64(id)
-	return sh, replaced, tx.Commit()
+	if err := tx.QueryRowContext(ctx, `SELECT started_at FROM shifts WHERE id = ?`, sh.ID).Scan(&startedAt); err != nil {
+		return sh, startedAt, nil, err
+	}
+	return sh, startedAt.UTC(), replaced, tx.Commit()
 }
 
 var finalLocations = map[string]bool{"terminal": true, "workshop": true, "depot": true}
 
-// EndShift is POST /api/v1/driver/shifts/end {"finalLocation": "terminal"|"workshop"|"depot"}.
+// EndShift is POST /api/v1/driver/shifts/end {"finalLocation": "terminal"|"workshop"|"depot"} and
+// answers with the times recorded for the route: {"startedAt", "endedAt"}.
 func (s *Service) EndShift(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		FinalLocation string `json:"finalLocation"`
@@ -237,12 +302,24 @@ func (s *Service) EndShift(w http.ResponseWriter, r *http.Request) error {
 	if !finalLocations[req.FinalLocation] {
 		return httpx.BadRequest("finalLocation debe ser terminal, workshop o depot")
 	}
-	c := auth.FromContext(r.Context())
-	if err := s.closeShift(r.Context(), c.ShiftID, "completed", req.FinalLocation); err != nil {
+	started, ended, err := s.Finish(r.Context(), auth.FromContext(r.Context()).ShiftID, req.FinalLocation)
+	if err != nil {
 		return err
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"startedAt": started, "endedAt": ended})
 	return nil
+}
+
+// Finish closes a shift as completed and returns when it started and ended (UTC).
+func (s *Service) Finish(ctx context.Context, shiftID uint64, finalLocation string) (started, ended time.Time, err error) {
+	if err := s.closeShift(ctx, shiftID, "completed", finalLocation); err != nil {
+		return started, ended, err
+	}
+	var st, en sql.NullTime
+	if err := s.DB.QueryRowContext(ctx, `SELECT started_at, ended_at FROM shifts WHERE id = ?`, shiftID).Scan(&st, &en); err != nil {
+		return started, ended, err
+	}
+	return st.Time.UTC(), en.Time.UTC(), nil
 }
 
 func (s *Service) closeShift(ctx context.Context, shiftID uint64, reason, finalLocation string) error {
@@ -442,8 +519,9 @@ func (s *Service) TrackerStatus(w http.ResponseWriter, r *http.Request) error {
 
 // ---- incidents ----
 
-// ReportIncident is POST /api/v1/driver/incidents {"type": "accident"|"breakdown"}: alerts riders on
-// the route immediately and closes the shift, as the app's panic slider does.
+// ReportIncident is POST /api/v1/driver/incidents {"type": "accident"|"breakdown"|"ramp_failure"}: alerts
+// riders on the route immediately. Accidents and breakdowns close the shift, as the app's panic slider
+// does; with a broken ramp the bus keeps its route, marked without ramp until the workshop fixes it.
 func (s *Service) ReportIncident(w http.ResponseWriter, r *http.Request) error {
 	var req struct {
 		Type string `json:"type"`
@@ -451,39 +529,62 @@ func (s *Service) ReportIncident(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
 	}
-	if req.Type != "accident" && req.Type != "breakdown" {
-		return httpx.BadRequest("type debe ser accident o breakdown")
+	if req.Type != "accident" && req.Type != "breakdown" && req.Type != "ramp_failure" {
+		return httpx.BadRequest("type debe ser accident, breakdown o ramp_failure")
 	}
 	return s.raiseIncident(w, r, auth.FromContext(r.Context()), req.Type)
 }
 
 func (s *Service) raiseIncident(w http.ResponseWriter, r *http.Request, c *auth.Claims, kind string) error {
-	shift, ok := s.Hub.Shift(c.ShiftID)
+	id, err := s.Report(r.Context(), c.ShiftID, kind)
+	if err != nil {
+		return err
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"incidentId": id})
+	return nil
+}
+
+// Report records a driver's incident ("accident", "breakdown" or "ramp_failure") and alerts riders on
+// the route. Accidents and breakdowns close the shift; with a broken ramp the bus keeps its route,
+// marked without ramp until the workshop fixes it.
+func (s *Service) Report(ctx context.Context, shiftID uint64, kind string) (uint64, error) {
+	shift, ok := s.Hub.Shift(shiftID)
 	if !ok {
-		return httpx.ErrUnauthorized
+		return 0, httpx.ErrUnauthorized
 	}
 	var lat, lon any
 	if la, lo, ok := s.Hub.LastFix(shift.ID); ok {
 		lat, lon = la, lo
 	}
-	res, err := s.DB.ExecContext(r.Context(), `INSERT INTO incidents (shift_id, bus_id, route_id, type, lat, lon) VALUES (?, ?, ?, ?, ?, ?)`,
+	res, err := s.DB.ExecContext(ctx, `INSERT INTO incidents (shift_id, bus_id, route_id, type, lat, lon) VALUES (?, ?, ?, ?, ?, ?)`,
 		shift.ID, shift.BusID, shift.RouteID, kind, lat, lon)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	id, _ := res.LastInsertId()
+	n, _ := res.LastInsertId()
+	id := uint64(n)
+	if kind == "ramp_failure" {
+		// Same as the panel marking the ramp broken: riders' ETAs skip this bus at once.
+		if _, err := s.DB.ExecContext(ctx, `UPDATE buses SET status = 'ramp_broken', ramp_operational = FALSE
+			WHERE id = ? AND status = 'active'`, shift.BusID); err != nil {
+			return 0, err
+		}
+		s.Hub.SetRamp(shift.BusID, false)
+		s.Hub.Alarm(id, shift.BusID, "rampFault")
+		slog.Warn("falla de rampa reportada", "id", id, "unidad", shift.BusNumber, "ruta", shift.RouteID)
+		return id, nil
+	}
 	alarm := "accident"
 	if kind == "breakdown" {
 		alarm = "fault"
 	}
 	// Alarm first: riders still know the bus's route when the event arrives.
-	s.Hub.Alarm(uint64(id), shift.BusID, alarm)
-	if err := s.closeShift(r.Context(), shift.ID, "emergency", ""); err != nil {
-		return err
+	s.Hub.Alarm(id, shift.BusID, alarm)
+	if err := s.closeShift(ctx, shift.ID, "emergency", ""); err != nil {
+		return 0, err
 	}
 	slog.Warn("incidente reportado", "id", id, "tipo", kind, "unidad", shift.BusNumber, "ruta", shift.RouteID)
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"incidentId": id})
-	return nil
+	return id, nil
 }
 
 // ---- ramp requests ----
@@ -525,10 +626,14 @@ func (s *Service) RequestRamp(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	newID, _ := res.LastInsertId()
-	notified := s.Hub.NotifyRamp(live.RampRequest{
+	ramp := live.RampRequest{
 		ID: uint64(newID), RouteID: stop.RouteID, StopID: stop.ID, StopName: stop.Name,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	notified := s.Hub.NotifyRamp(ramp)
+	if s.OnRamp != nil {
+		notified += s.OnRamp(ramp)
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"id": newID, "status": "pending", "driversNotified": notified})
 	return nil
 }
@@ -549,23 +654,32 @@ func (s *Service) RampStatus(w http.ResponseWriter, r *http.Request) error {
 
 // AckRamp is POST /api/v1/driver/ramp-requests/{id}/ack: only a driver on that route can ack it.
 func (s *Service) AckRamp(w http.ResponseWriter, r *http.Request) error {
-	c := auth.FromContext(r.Context())
-	shift, ok := s.Hub.Shift(c.ShiftID)
+	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return httpx.ErrNotFound
+	}
+	if err := s.Acknowledge(r.Context(), auth.FromContext(r.Context()).ShiftID, id); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// Acknowledge marks a pending ramp request as seen by the driver of shiftID (who must be on its route).
+func (s *Service) Acknowledge(ctx context.Context, shiftID, requestID uint64) error {
+	shift, ok := s.Hub.Shift(shiftID)
 	if !ok {
 		return httpx.ErrUnauthorized
 	}
-	res, err := s.DB.ExecContext(r.Context(), `UPDATE ramp_requests SET status = 'acknowledged', acknowledged_at = CURRENT_TIMESTAMP(3),
-		ack_shift_id = ? WHERE id = ? AND route_id = ? AND status = 'pending'`, shift.ID, r.PathValue("id"), shift.RouteID)
+	res, err := s.DB.ExecContext(ctx, `UPDATE ramp_requests SET status = 'acknowledged', acknowledged_at = CURRENT_TIMESTAMP(3),
+		ack_shift_id = ? WHERE id = ? AND route_id = ? AND status = 'pending'`, shift.ID, requestID, shift.RouteID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return httpx.NewError(http.StatusConflict, "not_pending", "La solicitud ya no está pendiente")
 	}
-	var id uint64
-	fmt.Sscan(r.PathValue("id"), &id)
-	s.Hub.NotifyRampAck(shift.RouteID, id)
-	w.WriteHeader(http.StatusNoContent)
+	s.Hub.NotifyRampAck(shift.RouteID, requestID)
 	return nil
 }
 

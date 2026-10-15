@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 
 	"github.com/eter/rutacree-backend/internal/httpx"
@@ -132,6 +133,18 @@ func (c *Catalog) Route(id string) (*Route, bool) {
 	defer c.mu.RUnlock()
 	r, ok := c.routes[id]
 	return r, ok
+}
+
+// Routes lists the active routes, ordered by id.
+func (c *Catalog) Routes() []*Route {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]*Route, 0, len(c.routes))
+	for _, r := range c.routes {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (c *Catalog) Stop(id string) (*StopRef, bool) {

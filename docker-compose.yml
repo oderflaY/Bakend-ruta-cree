@@ -64,13 +64,17 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # Only Caddy (fixed IP below) may set X-Forwarded-For. Never trust the whole subnet: traffic
       # arriving through the published port shows up as the gateway (172.30.0.1).
-      TRUSTED_PROXIES: 172.30.0.10/32
+      TRUSTED_PROXIES: 172.30.0.10/32,172.30.0.1/32,45.174.90.233/32
       POSITION_RETENTION_DAYS: ${POSITION_RETENTION_DAYS:-30}
       # Traccar: bus positions come from Traccar Client on the driver's phone.
       TRACCAR_URL: http://traccar:8082
       TRACCAR_EMAIL: ${TRACCAR_EMAIL:-traccar@rutacree.mx}
       TRACCAR_PASSWORD_FILE: /run/secrets/traccar_password
       TRACCAR_PUBLIC_OSMAND_URL: ${TRACCAR_PUBLIC_OSMAND_URL:-}
+      # WhatsApp del despacho al que el chofer manda inicio/fin de ruta y fallas.
+      WHATSAPP_DESPACHO: ${WHATSAPP_DESPACHO:-}
+      # Sin semilla: las rutas se publican desde el panel (las de prueba se retiraron el 2026-10-12).
+      SEED_DIR: ""
       # Control panel (Frontend admin), served at /panel/ from this same origin.
       PANEL_DIR: /panel
     secrets: [db_password, jwt_secret, admin_password, traccar_password]

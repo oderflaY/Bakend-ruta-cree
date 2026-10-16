@@ -140,6 +140,9 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"DELETE /api/v1/admin/assignments/{id}", a.DeleteAssignment, desk},
 		{"PUT /api/v1/admin/routes", a.PutRoute, sa},
 		{"DELETE /api/v1/admin/routes/{id}", a.DeleteRoute, sa},
+		// Route editor: path along the streets and the street under a stop (proxied to OSRM).
+		{"GET /api/v1/admin/routing/route", a.RoutePath, sa},
+		{"GET /api/v1/admin/routing/street", a.StreetName, sa},
 		{"GET /api/v1/admin/reports", a.ListReports, desk},
 		{"PATCH /api/v1/admin/reports/{id}", a.UpdateReport, sa},
 		{"GET /api/v1/admin/incidents", a.ListIncidents, desk},

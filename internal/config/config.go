@@ -49,6 +49,9 @@ type Config struct {
 	// Time zone for the times the bot writes (the server runs in UTC).
 	LocalTimeZone string
 
+	// OSRM server the route editor uses to follow the streets (the public demo by default).
+	RoutingURL string
+
 	// Bootstrap admin, created only when the admins table is empty.
 	AdminEmail    string
 	AdminPassword string
@@ -89,6 +92,7 @@ func Load() (*Config, error) {
 		WhatsAppPhoneID:   strings.TrimSpace(env("WHATSAPP_PHONE_NUMBER_ID", "")),
 		WhatsAppAPIBase:   env("WHATSAPP_API_BASE", "https://graph.facebook.com/v23.0"),
 		LocalTimeZone:     env("ZONA_HORARIA", "America/Mexico_City"),
+		RoutingURL:        strings.TrimRight(env("ROUTING_URL", "https://router.project-osrm.org"), "/"),
 		PositionRetention: 30 * 24 * time.Hour,
 		MaxSocketClients:  5000,
 	}

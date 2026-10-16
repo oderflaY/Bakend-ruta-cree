@@ -179,6 +179,8 @@ func (s *Service) Begin(ctx context.Context, req startShiftReq) (Started, error)
 	switch err := s.DB.QueryRowContext(ctx, `SELECT status FROM buses WHERE number = ?`, req.BusNumber).Scan(&busStatus); {
 	case err == nil && busStatus == "workshop":
 		return Started{}, httpx.NewError(http.StatusConflict, "bus_in_workshop", "La unidad está en el taller; avisa al despacho")
+	case err == nil && busStatus == "retired":
+		return Started{}, httpx.NewError(http.StatusConflict, "bus_retired", "Esa unidad está dada de baja; revisa el número económico")
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return Started{}, err
 	}

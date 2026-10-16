@@ -239,6 +239,16 @@ func wrap(text string, width int) []string {
 // Bus identifies the vehicle on the forms.
 type Bus struct {
 	Number, Plates, Brand, Model string
+	Year                         int // 0 = unknown
+}
+
+// Modelo is "DINA 2017": brand, model and year, as the vehicle forms ask for it.
+func (b Bus) Modelo() string {
+	s := strings.TrimSpace(b.Brand + " " + b.Model)
+	if b.Year > 0 {
+		s = strings.TrimSpace(fmt.Sprintf("%s %d", s, b.Year))
+	}
+	return s
 }
 
 // Label is the vehicle line of the service order: "MERCEDES No. ECONOMICO 25-1451 PLACAS: 13-EZC-C".

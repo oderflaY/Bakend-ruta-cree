@@ -49,7 +49,10 @@ def despike(L, close=12, maxlen=350):
     for p in L[1:]:
         if d(p, out[-1]) > 0.5: out.append(p)
     return out
-ida = despike(m['ida']['matched']); vuelta = despike(m['vuelta']['matched'])
+# DESPIKE=0 for routes traced with corr.py: their out-and-back spurs (retornos) are real.
+import os
+_ds = despike if os.environ.get('DESPIKE', '1') != '0' else (lambda L: [tuple(p) for p in L])
+ida = _ds(m['ida']['matched']); vuelta = _ds(m['vuelta']['matched'])
 line = ida + vuelta[1:] if d(ida[-1], vuelta[0]) < 1 else ida + vuelta
 cum = [0.0]
 for a, b in zip(line, line[1:]): cum.append(cum[-1] + d(a, b))
@@ -95,11 +98,13 @@ for p in placed:
     if p[2] != 0 and any(d(p[1], a) < 200 for a in anchors): continue
     if dedup and abs(p[0] - dedup[-1][0]) < 60: continue
     dedup.append(p)
-feats = [{"type": "Feature", "properties": {"id": rid, "name": rname, "color": color, "fuente": "Plano oficial Ruta Azul DIF Estatal (agosto 2026), georreferenciado"},
+props = {"id": rid, "name": rname, "color": color, "fuente": "Plano oficial Ruta Azul DIF Estatal (agosto 2026), georreferenciado"}
+if os.environ.get('DESTINO'): props["destino"] = os.environ['DESTINO']
+feats = [{"type": "Feature", "properties": props,
           "geometry": {"type": "LineString", "coordinates": [[round(x, 6), round(y, 6)] for x, y in line]}}]
 for n, (along, p, dist, side) in enumerate(dedup, 1):
     if along == 0.0: name = "DIF Estatal"
-    elif abs(along - ida_len) < 1: name = "CREE"
+    elif abs(along - ida_len) < 1: name = os.environ.get('DESTINO') or 'CREE'
     else: name = place_name(p)
     feats.append({"type": "Feature", "properties": {"id": f"{rid}-p{n}", "name": name[:120], "accessible": True},
                   "geometry": {"type": "Point", "coordinates": [round(p[0], 6), round(p[1], 6)]}})

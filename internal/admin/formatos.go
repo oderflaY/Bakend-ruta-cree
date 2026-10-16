@@ -425,7 +425,11 @@ func (h *Handler) formBus(ctx context.Context, id uint64) (formatos.Bus, error) 
 	if err != nil {
 		return formatos.Bus{}, err
 	}
-	return formatos.Bus{Number: b.Number, Plates: b.Plates, Brand: b.Brand, Model: b.Model}, nil
+	fb := formatos.Bus{Number: b.Number, Plates: b.Plates, Brand: b.Brand, Model: b.Model}
+	if b.Year != nil {
+		fb.Year = *b.Year
+	}
+	return fb, nil
 }
 
 // ---- vehicle reports ----

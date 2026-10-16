@@ -5,6 +5,8 @@
 //	api driver-login <id> <email> [name]  set (or create, with a name) a driver's login; the password
 //	                                      is read from stdin
 //	                               (never from argv: it would show in ps/history)
+//	api publicar-ruta <geojson>...  write routes to the database
+//	api importar-flota <xlsx> [--baja-resto]  load the DIF fleet spreadsheet into buses
 package main
 
 import (
@@ -59,6 +61,12 @@ func main() {
 				name = os.Args[4]
 			}
 			err = setDriverLogin(os.Args[2], os.Args[3], name)
+		}
+	case "importar-flota":
+		if len(os.Args) < 3 || len(os.Args) > 4 || (len(os.Args) == 4 && os.Args[3] != "--baja-resto") {
+			err = errors.New("uso: api importar-flota <parque-vehicular.xlsx> [--baja-resto]  (--baja-resto da de baja las unidades que no vienen en el Excel)")
+		} else {
+			err = importFleet(os.Args[2], len(os.Args) == 4)
 		}
 	case "publicar-ruta":
 		if len(os.Args) < 3 {
@@ -319,5 +327,35 @@ func publishRoutes(files []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "Ruta publicada: %s (%s, %d paradas)\n", r.ID, r.Name, len(r.Stops))
 	}
+	return nil
+}
+
+// importFleet loads the DIF fleet spreadsheet (PARQUE VEHICULAR) into buses, like the panel's import.
+func importFleet(file string, retireOthers bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fleet, err := admin.ParseFleet(f)
+	if err != nil {
+		return err
+	}
+	pool, err := db.Open(ctx, cfg.DSN())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	res, err := admin.ImportFleet(ctx, pool, fleet, retireOthers)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Parque vehicular: %d nuevas, %d actualizadas, %d dadas de baja\n", len(res.Created), len(res.Updated), len(res.Retired))
 	return nil
 }

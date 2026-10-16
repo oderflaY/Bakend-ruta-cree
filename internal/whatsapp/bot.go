@@ -195,7 +195,7 @@ func (b *Bot) step(ctx context.Context, sess *Session, driver Driver, open OpenS
 		bus := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(in.Text), " ", ""))
 		bus = strings.TrimPrefix(strings.TrimPrefix(bus, "UNIDAD"), "#")
 		if !dispatch.BusNumberPattern.MatchString(bus) {
-			return b.Send.Text(ctx, to, "Escribe solo el número económico de la unidad (ej. 22 o LT001).")
+			return b.Send.Text(ctx, to, "Escribe solo el número económico de la unidad (ej. 25-3369).")
 		}
 		status, err := b.Store.BusStatus(ctx, bus)
 		if err != nil {
@@ -206,6 +206,8 @@ func (b *Bot) step(ctx context.Context, sess *Session, driver Driver, open OpenS
 			return b.Send.Text(ctx, to, fmt.Sprintf("No encuentro la unidad *%s* en la flotilla. Revisa el número económico y escríbelo otra vez.", bus))
 		case "workshop":
 			return b.Send.Text(ctx, to, fmt.Sprintf("La unidad *%s* está en el taller. Escribe otra unidad o avisa al despacho.", bus))
+		case "retired":
+			return b.Send.Text(ctx, to, fmt.Sprintf("La unidad *%s* está dada de baja. Revisa el número económico (ej. 25-3369).", bus))
 		}
 		sess.Draft.Bus = bus
 		sess.Step = stepRoute

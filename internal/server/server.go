@@ -133,6 +133,7 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"GET /api/v1/admin/buses", a.ListBuses, all},
 		{"POST /api/v1/admin/buses", a.CreateBus, sa},
 		{"PATCH /api/v1/admin/buses/{id}", a.UpdateBus, fleet},
+		{"POST /api/v1/admin/buses/import", a.ImportBuses, sa},
 		{"GET /api/v1/admin/buses/{id}/track", a.Track, desk},
 		{"GET /api/v1/admin/assignments", a.ListAssignments, desk},
 		{"POST /api/v1/admin/assignments", a.CreateAssignment, desk},

@@ -17,3 +17,20 @@ Requisitos (en un venv): `pip install pymupdf numpy scipy scikit-image matplotli
 6. `python final.py osm.json mN.json stN.json tfN.json rN.json azul-N "Ruta N - Nombre" "#RRGGBB" azul-N.geojson rawN.json`
 7. Revisar con `python preview.py osm.json azul-N.geojson <raw ida/vuelta> prevN.png` y publicar
    (PUT /api/v1/admin/routes).
+
+## Rutas 1, 2 y 5 (octubre 2026): trazo por corredor
+
+El ajuste con OSRM (`match.py`) hacía zigzags en estas rutas (calles divididas, nombres distintos en OSM:
+el Blvd. Guadiana es "Av. Sahuatoba" y la Carr. al Mezquital es "Blvd. IPN"). Se trazaron así:
+
+1. Pasos 1–3 igual (extract + georef2; los `tfN.json` quedaron en `specs/`).
+2. `specs/specN.json`: puntos de paso en orden según el ITINERARIO del plano, para ida y vuelta.
+   Cada punto es `{"p": [px, py]}` (pixeles del plano a 110 dpi) o `{"geo": [lon, lat]}`; `"s"` = regex
+   del nombre de calle donde debe caer; `"d": true` = tramo recto copiado del plano (calles que OSM no tiene).
+3. `python corr.py osm.json specs/specN.json rN.json cN.json` — camino por la red de calles entre los
+   puntos, donde cada calle cuesta más mientras más lejos queda de la franja dibujada en el plano (así
+   respeta el dibujo y no "corta camino"). `near.py osm.json lon lat` lista las calles cercanas a un punto.
+4. Revisar sobre el plano: `python ov.py osm.json plano.pdf specs/tfN.json cN.json out.png [x0 y0 x1 y1]`.
+5. `final.py` con `DESPIKE=0` (los retornos son reales) y, en la ruta 5, que no termina en el CREE,
+   `DESTINO="CAM Joyas del Valle"`. `cN.json` tiene el mismo formato que la salida de `match.py`; el
+   último argumento (líneas para elegir el lado de cada parada) es `{"ida": cN.ida.matched, "vuelta": …}`.

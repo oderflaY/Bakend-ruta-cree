@@ -565,6 +565,7 @@ func (h *Handler) CreateBus(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	id, _ := res.LastInsertId()
+	h.Dispatch.RegisterDevice(r.Context(), number)
 	h.audit(r, "dio de alta la Unidad %s", number)
 	b, err := h.loadBus(r.Context(), uint64(id))
 	if err != nil {

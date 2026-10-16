@@ -257,6 +257,9 @@ func (h *Handler) ImportBuses(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
+	for _, num := range res.Created {
+		h.Dispatch.RegisterDevice(r.Context(), num)
+	}
 	h.audit(r, "importó el parque vehicular: %d nuevas, %d actualizadas, %d dadas de baja", len(res.Created), len(res.Updated), len(res.Retired))
 	httpx.WriteJSON(w, http.StatusOK, res)
 	return nil

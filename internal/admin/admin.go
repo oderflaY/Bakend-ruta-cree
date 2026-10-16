@@ -32,6 +32,8 @@ type Handler struct {
 	TokenTTL time.Duration
 	// Local time zone of the printed forms (dates and trip times).
 	Location *time.Location
+	// Street routing for the route editor (OSRM); nil turns the snapping off.
+	Routing *Router
 }
 
 // EnsureAdmin creates the first admin from ADMIN_EMAIL / ADMIN_PASSWORD when there is none.

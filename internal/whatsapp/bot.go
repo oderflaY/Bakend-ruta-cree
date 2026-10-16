@@ -187,7 +187,7 @@ func (b *Bot) step(ctx context.Context, sess *Session, driver Driver, open OpenS
 		if choice == "start" || hasAny(word, "inicio", "iniciar", "empezar", "comenzar") {
 			sess.Draft = Draft{}
 			sess.Step = stepBus
-			return b.Send.Text(ctx, to, "🚌 *Iniciar ruta*\n\n¿Qué *unidad* manejas hoy? Escribe el número económico (ej. 22 o LT001).\n\n_Escribe «cancelar» en cualquier momento para salir._")
+			return b.Send.Text(ctx, to, "🚌 *Iniciar ruta*\n\n¿Qué *unidad* manejas hoy? Escribe el número económico (ej. 25-3369).\n\n_Escribe «cancelar» en cualquier momento para salir._")
 		}
 		return b.idleMenu(ctx, to, driver, "")
 

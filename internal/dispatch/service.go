@@ -214,14 +214,7 @@ func (s *Service) Begin(ctx context.Context, req startShiftReq) (Started, error)
 		s.Hub.RemoveShift(id)
 	}
 	s.Hub.AddShift(shift)
-	if s.Tracker != nil {
-		// Best effort: the shift is valid even if Traccar is down.
-		tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := s.Tracker.EnsureDevice(tctx, shift.BusNumber); err != nil {
-			slog.Warn("no se registró la unidad en Traccar", "unidad", shift.BusNumber, "error", err)
-		}
-		cancel()
-	}
+	s.RegisterDevice(ctx, shift.BusNumber)
 	slog.Info("turno iniciado", "turno", shift.ID, "chofer", req.DriverID, "unidad", req.BusNumber, "ruta", req.RouteID,
 		"discapacidad", req.Disability, "adultos_mayores", req.Elderly, "embarazadas", req.Pregnant,
 		"acompanantes", req.Companions, "hombres", req.Men, "mujeres", req.Women)
@@ -362,6 +355,19 @@ func (s *Service) CloseDriverShifts(ctx context.Context, driverID string) error 
 		}
 	}
 	return nil
+}
+
+// RegisterDevice adds the bus to Traccar so its GPS is accepted from the first report. Best effort:
+// with Traccar down the bus still works (and it is retried when a shift starts).
+func (s *Service) RegisterDevice(ctx context.Context, busNumber string) {
+	if s.Tracker == nil {
+		return
+	}
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.Tracker.EnsureDevice(tctx, busNumber); err != nil {
+		slog.Warn("no se registró la unidad en Traccar", "unidad", busNumber, "error", err)
+	}
 }
 
 // CloseBusShifts ends the open shift of a bus sent to the workshop: it disappears from the riders' map.

@@ -132,6 +132,12 @@ func Summarize(from, to time.Time, trips []Trip, incidents []IncidentAt, routes 
 		d.Trips++
 		d.Users += t.Users.Total()
 	}
+	// Every route of the catalog shows up, even with no trips: "rutas más usadas" ranks all of them.
+	for id, info := range routes {
+		if byRoute[id] == nil {
+			byRoute[id] = &RouteStat{ID: id, Name: info.Name, Color: info.Color}
+		}
+	}
 	for _, r := range byRoute {
 		s.Routes = append(s.Routes, *r)
 	}

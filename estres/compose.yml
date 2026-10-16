@@ -1,0 +1,40 @@
+# Replica of the production stack for the load test (estres/README.md). It runs beside the dev
+# stack (own project, network, ports and volumes) inside rutacree-estres.slice, a cgroup with the
+# VPS's budget, so every container shares the same CPU and memory like on the real server.
+x-vps: &vps
+  cgroup_parent: rutacree-estres.slice
+
+services:
+  db:
+    <<: *vps
+  api:
+    <<: *vps
+    environment:
+      # Caddy forwards the load generator's per-rider X-Forwarded-For (see estres/Caddyfile);
+      # the gateway hop is trusted too so each simulated phone gets its own rate-limit bucket.
+      TRUSTED_PROXIES: 172.31.0.10/32,172.31.0.1/32
+    ports: !override
+      - "127.0.0.1:18080:8080"
+  traccar:
+    <<: *vps
+    ports: !override
+      - "127.0.0.1:15055:5055"
+  caddy:
+    <<: *vps
+    environment:
+      DOMAIN: localhost
+    ports: !override
+      - "127.0.0.1:8443:443"
+    volumes: !override
+      - ./estres/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        ipv4_address: 172.31.0.10
+
+networks:
+  edge:
+    ipam:
+      config: !override
+        - subnet: 172.31.0.0/24

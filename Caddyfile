@@ -39,3 +39,21 @@ fued.{$DOMAIN} {
 		header_up X-Forwarded-Proto {scheme}
 	}
 }
+
+# Evidencia360 (otra app, stack propio en /root/evidencia360/api/deploy del repo Evidencia360).
+# Caddy sólo le da HTTPS; si Evidencia360 está apagado, RutaCree no se entera.
+evidencia360.{$DOMAIN} {
+	encode zstd gzip
+
+	header Strict-Transport-Security "max-age=63072000"
+	header -Server
+
+	# Una incidencia sube hasta 10 fotos originales + editadas + escenas en un solo multipart.
+	request_body {
+		max_size 320MB
+	}
+
+	reverse_proxy evidencia360-api:80 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

@@ -1,0 +1,30 @@
+# Production Caddyfile plus trusted X-Forwarded-For, for the load-test replica only.
+{
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# The API sets its own security headers; Caddy adds HSTS on top of automatic HTTPS.
+	header Strict-Transport-Security "max-age=63072000; includeSubDomains"
+	header -Server
+
+	request_body {
+		max_size 5MB
+	}
+
+	# Traccar Client on the drivers' phones: "Server URL" = https://DOMAIN/osmand
+	# Traccar only accepts devices registered by the API, so this doesn't open Traccar to anyone.
+	handle_path /osmand* {
+		reverse_proxy traccar:5055
+	}
+
+	handle {
+		reverse_proxy api:8080 {
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}

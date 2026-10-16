@@ -68,6 +68,27 @@ Cada uno de esos avisos abre WhatsApp con el mensaje listo para el despacho; el 
 En el panel, **Turnos y Flotilla → Bitácora de viajes** muestra inicio, fin, duración y pasajeros de cada
 ruta del día (`GET /api/v1/admin/shifts?from=…&to=…`, fechas RFC3339).
 
+### Chatbot de WhatsApp (opcional)
+
+Con la WhatsApp Cloud API de Meta, el chofer hace todo lo anterior **chateando con el número del
+despacho**, sin la app: escribe «hola» y el bot le pregunta unidad, ruta, niños, adultos y mujeres, le
+da un menú (falla de rampa, falla del camión, choque, terminar ruta) y le manda las solicitudes de rampa
+con un botón «Enterado». Al chofer se le reconoce por el **teléfono de su cuenta** (panel → Cuentas →
+Teléfono; cuentan los últimos 10 dígitos).
+
+Variables en `.env` (el bot queda apagado si `WHATSAPP_PHONE_NUMBER_ID` está vacío):
+
+| Variable | De dónde sale |
+|---|---|
+| `WHATSAPP_PHONE_NUMBER_ID` | Meta → app → WhatsApp → Configuración de la API → *Identificador del número de teléfono* |
+| `WHATSAPP_TOKEN` | Token permanente de un usuario del sistema (permisos `whatsapp_business_messaging` y `whatsapp_business_management`) |
+| `WHATSAPP_APP_SECRET` | Meta → app → Configuración → Básica → *Clave secreta de la app* |
+| `WHATSAPP_VERIFY_TOKEN` | Lo inventas tú (16+ caracteres); se escribe igual en Meta |
+
+En Meta → WhatsApp → Configuración → Webhook: URL `https://DOMINIO/api/whatsapp/webhook`, el mismo
+token de verificación, y suscribir el campo **messages**. Las horas que escribe el bot usan `ZONA_HORARIA`
+(por omisión `America/Mexico_City`).
+
 ## Traccar: GPS de los camiones
 
 > Lo que sigue describe Traccar Client en el teléfono del chofer, que era el esquema anterior. Con el GPS

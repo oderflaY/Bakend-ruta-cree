@@ -34,6 +34,8 @@ type Trip struct {
 	Started time.Time
 	Ended   *time.Time
 	Users   Counts
+	// Counted: the driver gave the users (trips started before the counts were asked have none).
+	Counted bool
 }
 
 // Note is something that happened on a route (a failure the driver reported), for OBSERVACIONES.
@@ -48,6 +50,9 @@ type Week struct {
 	Monday time.Time
 	Trips  []Trip
 	Notes  []Note
+	// For the ESTADÍSTICAS sheet: route names and the failures the drivers reported.
+	Routes    map[string]RouteInfo
+	Incidents []IncidentAt
 }
 
 const (
@@ -169,6 +174,11 @@ func (b *Book) fillBitacora(w Week) error {
 				return err
 			}
 		}
+	}
+
+	// ESTADÍSTICAS: the week (Monday to Sunday) in numbers and charts.
+	if err := b.addStatsSheet(Summarize(w.Monday, w.Monday.AddDate(0, 0, 6), w.Trips, w.Incidents, w.Routes)); err != nil {
+		return err
 	}
 
 	// Hoja4 is the blank vehicle report that travels with the log: fillable as it is.

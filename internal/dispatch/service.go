@@ -52,6 +52,8 @@ type Service struct {
 	WhatsApp string
 	// Also told about every new ramp request (the WhatsApp bot); returns how many drivers it reached.
 	OnRamp func(live.RampRequest) int
+	// Local time zone of the forms (the vehicle report's day and times); nil is time.Local.
+	Location *time.Location
 }
 
 // LoadActiveShifts restores open shifts into the hub after a restart.
@@ -177,6 +179,8 @@ func (s *Service) Begin(ctx context.Context, req startShiftReq) (Started, error)
 	switch err := s.DB.QueryRowContext(ctx, `SELECT status FROM buses WHERE number = ?`, req.BusNumber).Scan(&busStatus); {
 	case err == nil && busStatus == "workshop":
 		return Started{}, httpx.NewError(http.StatusConflict, "bus_in_workshop", "La unidad está en el taller; avisa al despacho")
+	case err == nil && busStatus == "retired":
+		return Started{}, httpx.NewError(http.StatusConflict, "bus_retired", "Esa unidad está dada de baja; revisa el número económico")
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return Started{}, err
 	}
@@ -563,6 +567,10 @@ func (s *Service) Report(ctx context.Context, shiftID uint64, kind string) (uint
 	}
 	n, _ := res.LastInsertId()
 	id := uint64(n)
+	if err := s.noteOnVehicleReport(ctx, shift, kind, time.Now()); err != nil {
+		// The incident is what matters; the form can still be written from the panel.
+		slog.Error("anotando la falla en el reporte de vehículo", "incidente", id, "error", err)
+	}
 	if kind == "ramp_failure" {
 		// Same as the panel marking the ramp broken: riders' ETAs skip this bus at once.
 		if _, err := s.DB.ExecContext(ctx, `UPDATE buses SET status = 'ramp_broken', ramp_operational = FALSE
@@ -585,6 +593,61 @@ func (s *Service) Report(ctx context.Context, shiftID uint64, kind string) (uint
 	}
 	slog.Warn("incidente reportado", "id", id, "tipo", kind, "unidad", shift.BusNumber, "ruta", shift.RouteID)
 	return id, nil
+}
+
+// What the driver reported, as it reads on the vehicle report.
+var incidentText = map[string]string{"accident": "Accidente", "breakdown": "Falla del camión", "ramp_failure": "Falla de rampa"}
+
+// maxObservations is vehicle_reports.observations' size.
+const maxObservations = 2000
+
+// noteOnVehicleReport writes the driver's report on the bus's vehicle report of the day ("Reporte de
+// vehículo"), so the form fills itself: the system keeps one report per bus and day (created_by NULL)
+// and adds a line per report; the ones the panel opens by hand are left alone.
+func (s *Service) noteOnVehicleReport(ctx context.Context, shift live.Shift, kind string, at time.Time) error {
+	loc := s.Location
+	if loc == nil {
+		loc = time.Local
+	}
+	at = at.In(loc)
+	var driver string
+	if err := s.DB.QueryRowContext(ctx, `SELECT name FROM drivers WHERE id = ?`, shift.DriverID).Scan(&driver); err != nil &&
+		!errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	route := shift.RouteID
+	if r, ok := s.Catalog.Route(shift.RouteID); ok {
+		route = r.Name
+	}
+	line := fmt.Sprintf("%s %s reportada por el chofer %s en %s.", at.Format("15:04"), incidentText[kind], strings.TrimSpace(driver), route)
+	if driver == "" {
+		line = fmt.Sprintf("%s %s reportada por el chofer en %s.", at.Format("15:04"), incidentText[kind], route)
+	}
+	line = strings.ToUpper(line)
+
+	day := at.Format(time.DateOnly)
+	var (
+		id  uint64
+		obs string
+	)
+	err := s.DB.QueryRowContext(ctx, `SELECT id, observations FROM vehicle_reports
+		WHERE bus_id = ? AND day = ? AND created_by IS NULL ORDER BY id LIMIT 1`, shift.BusID, day).Scan(&id, &obs)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		_, err = s.DB.ExecContext(ctx, `INSERT INTO vehicle_reports (bus_id, day, observations) VALUES (?, ?, ?)`,
+			shift.BusID, day, line)
+		return err
+	case err != nil:
+		return err
+	}
+	if obs != "" {
+		line = obs + "\n" + line
+	}
+	if r := []rune(line); len(r) > maxObservations {
+		line = string(r[:maxObservations])
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE vehicle_reports SET observations = ? WHERE id = ?`, line, id)
+	return err
 }
 
 // ---- ramp requests ----

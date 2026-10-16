@@ -133,6 +133,7 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"GET /api/v1/admin/buses", a.ListBuses, all},
 		{"POST /api/v1/admin/buses", a.CreateBus, sa},
 		{"PATCH /api/v1/admin/buses/{id}", a.UpdateBus, fleet},
+		{"POST /api/v1/admin/buses/import", a.ImportBuses, sa},
 		{"GET /api/v1/admin/buses/{id}/track", a.Track, desk},
 		{"GET /api/v1/admin/assignments", a.ListAssignments, desk},
 		{"POST /api/v1/admin/assignments", a.CreateAssignment, desk},
@@ -160,6 +161,9 @@ func New(ctx context.Context, d Deps) http.Handler {
 		{"POST /api/v1/admin/vehicle-reports", a.CreateVehicleReport, all},
 		{"GET /api/v1/admin/vehicle-reports/{id}/xlsx", a.VehicleReportXLSX, all},
 		{"GET /api/v1/admin/formatos/bitacora", a.Bitacora, desk},
+		// Passenger statistics from the drivers' counts, as JSON for the charts or as Excel.
+		{"GET /api/v1/admin/estadisticas", a.Estadisticas, desk},
+		{"GET /api/v1/admin/estadisticas/xlsx", a.EstadisticasXLSX, desk},
 		// The DIF's forms, editable in the panel; each kind checks its own roles.
 		{"GET /api/v1/admin/formatos/{kind}/{ref}", a.GetForm, all},
 		{"PUT /api/v1/admin/formatos/{kind}/{ref}", a.SaveForm, all},

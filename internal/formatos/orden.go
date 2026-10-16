@@ -125,12 +125,11 @@ func (b *Book) fillVehiculo(v VehicleReport) error {
 		return err
 	}
 	sh := vehiculoSheet
-	model := strings.TrimSpace(v.Bus.Brand + " " + v.Bus.Model)
 	for cell, val := range map[string]string{
 		"A2": "FECHA: " + LongDate(v.Date),
 		"A3": "No. Economico: " + v.Bus.Number,
 		"A4": "Placas: " + v.Bus.Plates,
-		"A5": "Modelo: " + model,
+		"A5": "Modelo: " + v.Bus.Modelo(),
 	} {
 		if err := b.field(sh, cell, val); err != nil {
 			return err

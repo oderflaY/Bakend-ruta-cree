@@ -27,6 +27,8 @@ type Route struct {
 	Name  string
 	Color string
 	Stops []Stop
+	// Municipios the route serves, so apps and panel can show only the local ones.
+	Municipios []string
 	// GeoJSON as the app's parseRouteGeoJson expects it, re-encoded compactly.
 	GeoJSON json.RawMessage
 }
@@ -60,6 +62,8 @@ func ParseRoute(data []byte) (*Route, error) {
 
 	r := &Route{}
 	lines := 0
+	var line *feature
+	var lineCoords [][]float64
 	for i := range fc.Features {
 		f := &fc.Features[i]
 		if f.Properties == nil {
@@ -68,6 +72,7 @@ func ParseRoute(data []byte) (*Route, error) {
 		switch f.Geometry.Type {
 		case "LineString":
 			lines++
+			line = f
 			var coords [][]float64
 			if err := json.Unmarshal(f.Geometry.Coordinates, &coords); err != nil || len(coords) < 2 || len(coords) > 20000 {
 				return nil, fmt.Errorf("LineString inválido")
@@ -77,6 +82,7 @@ func ParseRoute(data []byte) (*Route, error) {
 					return nil, err
 				}
 			}
+			lineCoords = coords
 			r.ID, _ = f.Properties["id"].(string)
 			r.Name, _ = f.Properties["name"].(string)
 			r.Color, _ = f.Properties["color"].(string)
@@ -142,6 +148,22 @@ func ParseRoute(data []byte) (*Route, error) {
 			}
 		}
 		r.Stops = append(r.Stops, s)
+	}
+
+	// Written back so the apps and the panel read them instead of each inferring them again.
+	var err error
+	if r.Municipios, err = municipiosOf(line.Properties, lineCoords, r.Stops); err != nil {
+		return nil, err
+	}
+	line.Properties["municipios"] = r.Municipios
+	split, err := regresoDesde(line.Properties, lineCoords, r.Stops)
+	if err != nil {
+		return nil, err
+	}
+	if split > 0 {
+		line.Properties["regreso_desde"] = split
+	} else {
+		delete(line.Properties, "regreso_desde")
 	}
 
 	out, err := json.Marshal(map[string]any{"type": "FeatureCollection", "features": fc.Features})

@@ -7,7 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out="../rutacree-backend.tar.gz"
-panel="${PANEL_SRC:-../Frontend admin}"
+# El panel es el build de React (~/frontend-admin-react: npm run build → dist/).
+panel="${PANEL_SRC:-../frontend-admin-react/dist}"
 if [ ! -f "$panel/index.html" ]; then
 	echo "No encuentro el panel en '$panel' (usa PANEL_SRC=ruta)." >&2
 	exit 1

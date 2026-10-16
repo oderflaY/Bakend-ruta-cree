@@ -139,17 +139,27 @@ func (h *Handler) form(r *http.Request) (form, error) {
 
 // week gathers the trips and the drivers' failure reports of the week starting on monday.
 func (h *Handler) week(ctx context.Context, monday time.Time) (formatos.Week, error) {
+	w := formatos.Week{Monday: monday, Routes: h.routeInfo()}
+	var err error
+	if w.Trips, err = h.trips(ctx, monday, monday.AddDate(0, 0, 7)); err != nil {
+		return w, err
+	}
+	w.Notes, w.Incidents, err = h.incidents(ctx, monday, monday.AddDate(0, 0, 7))
+	return w, err
+}
+
+// trips are the routes started from `from` until `to` (local times), with the users the drivers counted.
+func (h *Handler) trips(ctx context.Context, from, to time.Time) ([]formatos.Trip, error) {
 	loc := h.loc()
-	w := formatos.Week{Monday: monday}
-	from, to := monday.UTC(), monday.AddDate(0, 0, 7).UTC()
 	rows, err := h.DB.QueryContext(ctx, `SELECT s.route_id, d.name, s.started_at, s.ended_at,
 		s.disability, s.elderly, s.pregnant, s.companions, s.men, s.women
 		FROM shifts s JOIN drivers d ON d.id = s.driver_id
-		WHERE s.started_at >= ? AND s.started_at < ? ORDER BY s.started_at`, from, to)
+		WHERE s.started_at >= ? AND s.started_at < ? ORDER BY s.started_at`, from.UTC(), to.UTC())
 	if err != nil {
-		return w, err
+		return nil, err
 	}
 	defer rows.Close()
+	var out []formatos.Trip
 	for rows.Next() {
 		var (
 			t                             formatos.Trip
@@ -157,7 +167,7 @@ func (h *Handler) week(ctx context.Context, monday time.Time) (formatos.Week, er
 			dis, eld, preg, comp, men, wo sql.NullInt64
 		)
 		if err := rows.Scan(&t.RouteID, &t.Driver, &t.Started, &ended, &dis, &eld, &preg, &comp, &men, &wo); err != nil {
-			return w, err
+			return nil, err
 		}
 		t.Started = t.Started.In(loc)
 		if ended.Valid {
@@ -166,30 +176,117 @@ func (h *Handler) week(ctx context.Context, monday time.Time) (formatos.Week, er
 		}
 		t.Users = formatos.Counts{Disability: nullInt(dis), Elderly: nullInt(eld), Pregnant: nullInt(preg),
 			Companions: nullInt(comp), Men: nullInt(men), Women: nullInt(wo)}
-		w.Trips = append(w.Trips, t)
+		t.Counted = men.Valid || wo.Valid
+		out = append(out, t)
 	}
-	if err := rows.Err(); err != nil {
-		return w, err
-	}
-	notes, err := h.DB.QueryContext(ctx, `SELECT i.route_id, i.type, i.created_at, b.number
+	return out, rows.Err()
+}
+
+// incidents are the drivers' failure reports from `from` until `to`: as notes for OBSERVACIONES and as
+// counts for the statistics.
+func (h *Handler) incidents(ctx context.Context, from, to time.Time) ([]formatos.Note, []formatos.IncidentAt, error) {
+	loc := h.loc()
+	rows, err := h.DB.QueryContext(ctx, `SELECT i.route_id, i.type, i.created_at, b.number
 		FROM incidents i JOIN buses b ON b.id = i.bus_id
-		WHERE i.created_at >= ? AND i.created_at < ? ORDER BY i.created_at`, from, to)
+		WHERE i.created_at >= ? AND i.created_at < ? ORDER BY i.created_at`, from.UTC(), to.UTC())
 	if err != nil {
-		return w, err
+		return nil, nil, err
 	}
-	defer notes.Close()
+	defer rows.Close()
 	label := map[string]string{"accident": "Accidente", "breakdown": "Falla del camión", "ramp_failure": "Falla de rampa"}
-	for notes.Next() {
+	var notes []formatos.Note
+	var all []formatos.IncidentAt
+	for rows.Next() {
 		var n formatos.Note
 		var typ, bus string
-		if err := notes.Scan(&n.RouteID, &typ, &n.At, &bus); err != nil {
-			return w, err
+		if err := rows.Scan(&n.RouteID, &typ, &n.At, &bus); err != nil {
+			return nil, nil, err
 		}
 		n.At = n.At.In(loc)
 		n.Text = fmt.Sprintf("%s (Unidad %s)", label[typ], bus)
-		w.Notes = append(w.Notes, n)
+		notes = append(notes, n)
+		all = append(all, formatos.IncidentAt{Kind: typ, At: n.At})
 	}
-	return w, notes.Err()
+	return notes, all, rows.Err()
+}
+
+func (h *Handler) routeInfo() map[string]formatos.RouteInfo {
+	out := map[string]formatos.RouteInfo{}
+	if h.Catalog == nil {
+		return out
+	}
+	for _, r := range h.Catalog.Routes() {
+		out[r.ID] = formatos.RouteInfo{Name: r.Name, Color: r.Color}
+	}
+	return out
+}
+
+// statsPeriod reads ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD (local days, inclusive; by default the last 30
+// days) and answers the period's statistics.
+func (h *Handler) statsPeriod(r *http.Request) (formatos.Stats, error) {
+	loc := h.loc()
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	from, to := today.AddDate(0, 0, -29), today
+	parse := func(key string, def time.Time) (time.Time, error) {
+		v := r.URL.Query().Get(key)
+		if v == "" {
+			return def, nil
+		}
+		t, err := time.ParseInLocation(time.DateOnly, v, loc)
+		if err != nil {
+			return t, httpx.BadRequest(key + " va como fecha YYYY-MM-DD")
+		}
+		return t, nil
+	}
+	var err error
+	if from, err = parse("desde", from); err != nil {
+		return formatos.Stats{}, err
+	}
+	if to, err = parse("hasta", to); err != nil {
+		return formatos.Stats{}, err
+	}
+	if to.Before(from) {
+		return formatos.Stats{}, httpx.BadRequest("hasta no puede ser antes de desde")
+	}
+	if to.Sub(from) > 366*24*time.Hour {
+		return formatos.Stats{}, httpx.BadRequest("El periodo va hasta de un año")
+	}
+	end := to.AddDate(0, 0, 1)
+	trips, err := h.trips(r.Context(), from, end)
+	if err != nil {
+		return formatos.Stats{}, err
+	}
+	_, inc, err := h.incidents(r.Context(), from, end)
+	if err != nil {
+		return formatos.Stats{}, err
+	}
+	return formatos.Summarize(from, to, trips, inc, h.routeInfo()), nil
+}
+
+// Estadisticas is GET /api/v1/admin/estadisticas?desde=YYYY-MM-DD&hasta=YYYY-MM-DD.
+func (h *Handler) Estadisticas(w http.ResponseWriter, r *http.Request) error {
+	s, err := h.statsPeriod(r)
+	if err != nil {
+		return err
+	}
+	httpx.WriteJSON(w, http.StatusOK, s)
+	return nil
+}
+
+// EstadisticasXLSX is GET /api/v1/admin/estadisticas/xlsx?desde=…&hasta=…: the same, as an Excel
+// workbook with tables and charts.
+func (h *Handler) EstadisticasXLSX(w http.ResponseWriter, r *http.Request) error {
+	s, err := h.statsPeriod(r)
+	if err != nil {
+		return err
+	}
+	data, err := formatos.StatsWorkbook(s)
+	if err != nil {
+		return err
+	}
+	writeXLSX(w, fmt.Sprintf("estadisticas-%s-al-%s.xlsx", s.From, s.To), data)
+	return nil
 }
 
 func (h *Handler) formValues(ctx context.Context, kind, ref string) (formatos.Values, error) {
@@ -328,7 +425,11 @@ func (h *Handler) formBus(ctx context.Context, id uint64) (formatos.Bus, error) 
 	if err != nil {
 		return formatos.Bus{}, err
 	}
-	return formatos.Bus{Number: b.Number, Plates: b.Plates, Brand: b.Brand, Model: b.Model}, nil
+	fb := formatos.Bus{Number: b.Number, Plates: b.Plates, Brand: b.Brand, Model: b.Model}
+	if b.Year != nil {
+		fb.Year = *b.Year
+	}
+	return fb, nil
 }
 
 // ---- vehicle reports ----

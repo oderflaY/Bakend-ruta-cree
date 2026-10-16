@@ -443,10 +443,10 @@ func (h *Handler) UpdateDriver(w http.ResponseWriter, r *http.Request) error {
 // ---- buses ----
 
 // BusStatus: "workshop" takes the bus out of service (its open shift is closed); "ramp_broken"
-// keeps it running but riders no longer count on it for a ramp.
+// keeps it running but riders no longer count on it for a ramp; "retired" = dada de baja del parque.
 type BusStatus string
 
-var busStatusName = map[BusStatus]string{"active": "Activo", "workshop": "En Taller", "ramp_broken": "Rampa Dañada"}
+var busStatusName = map[BusStatus]string{"active": "Activo", "workshop": "En Taller", "ramp_broken": "Rampa Dañada", "retired": "Baja"}
 
 type bus struct {
 	ID              uint64    `json:"id"`
@@ -454,17 +454,21 @@ type bus struct {
 	Plates          string    `json:"plates"`
 	Brand           string    `json:"brand"`
 	Model           string    `json:"model"`
+	Serial          string    `json:"serial"`
+	Year            *int      `json:"year"`
+	UnitNo          string    `json:"unitNo"`
+	Centro          string    `json:"centro"`
 	Status          BusStatus `json:"status"`
 	LastMaintenance *string   `json:"lastMaintenance"`
 	Ramp            bool      `json:"rampOperational"`
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
-const busColumns = `id, number, plates, brand, model, status, DATE_FORMAT(last_maintenance, '%Y-%m-%d'), ramp_operational, created_at`
+const busColumns = `id, number, plates, brand, model, serial, year, unit_no, centro, status, DATE_FORMAT(last_maintenance, '%Y-%m-%d'), ramp_operational, created_at`
 
 func scanBus(sc interface{ Scan(...any) error }) (bus, error) {
 	var b bus
-	err := sc.Scan(&b.ID, &b.Number, &b.Plates, &b.Brand, &b.Model, &b.Status, &b.LastMaintenance, &b.Ramp, &b.CreatedAt)
+	err := sc.Scan(&b.ID, &b.Number, &b.Plates, &b.Brand, &b.Model, &b.Serial, &b.Year, &b.UnitNo, &b.Centro, &b.Status, &b.LastMaintenance, &b.Ramp, &b.CreatedAt)
 	return b, err
 }
 
@@ -477,7 +481,7 @@ func (h *Handler) loadBus(ctx context.Context, id uint64) (bus, error) {
 }
 
 func (h *Handler) ListBuses(w http.ResponseWriter, r *http.Request) error {
-	rows, err := h.DB.QueryContext(r.Context(), `SELECT `+busColumns+` FROM buses ORDER BY LPAD(number, 16, '0')`)
+	rows, err := h.DB.QueryContext(r.Context(), `SELECT `+busColumns+` FROM buses ORDER BY status = 'retired', centro <> 'CREE DURANGO', centro, LPAD(number, 16, '0')`)
 	if err != nil {
 		return err
 	}
@@ -494,7 +498,10 @@ func (h *Handler) ListBuses(w http.ResponseWriter, r *http.Request) error {
 	return rows.Err()
 }
 
-var platesPattern = regexp.MustCompile(`^[A-Z0-9-]{0,16}$`)
+var (
+	platesPattern = regexp.MustCompile(`^[A-Z0-9-]{0,16}$`)
+	serialPattern = regexp.MustCompile(`^[A-Z0-9]{0,20}$`)
+)
 
 // cleanLabel normalizes a short free-text bus field (brand, model) to upper case, as on the forms.
 func cleanLabel(s, field string) (string, error) {
@@ -521,6 +528,10 @@ func (h *Handler) CreateBus(w http.ResponseWriter, r *http.Request) error {
 		Plates string `json:"plates"`
 		Brand  string `json:"brand"`
 		Model  string `json:"model"`
+		Serial string `json:"serial"`
+		Year   *int   `json:"year"`
+		UnitNo string `json:"unitNo"`
+		Centro string `json:"centro"`
 	}
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		return err
@@ -541,8 +552,12 @@ func (h *Handler) CreateBus(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	res, err := h.DB.ExecContext(r.Context(), `INSERT INTO buses (number, plates, brand, model) VALUES (?, ?, ?, ?)`,
-		number, plates, brand, model)
+	ext, err := cleanFleetFields(req.Serial, req.Year, req.UnitNo, req.Centro)
+	if err != nil {
+		return err
+	}
+	res, err := h.DB.ExecContext(r.Context(), `INSERT INTO buses (number, plates, brand, model, serial, year, unit_no, centro)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, number, plates, brand, model, ext.Serial, ext.Year, ext.UnitNo, ext.Centro)
 	if me, ok := errors.AsType[*mysql.MySQLError](err); ok && me.Number == 1062 {
 		return httpx.NewError(http.StatusConflict, "exists", "Ya existe esa unidad")
 	}
@@ -567,6 +582,10 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 		Plates          *string    `json:"plates"`
 		Brand           *string    `json:"brand"`
 		Model           *string    `json:"model"`
+		Serial          *string    `json:"serial"`
+		Year            *int       `json:"year"`
+		UnitNo          *string    `json:"unitNo"`
+		Centro          *string    `json:"centro"`
 		LastMaintenance *string    `json:"lastMaintenance"`
 		Ramp            *bool      `json:"rampOperational"`
 	}
@@ -594,7 +613,7 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 	sets, args, changes := []string{}, []any{}, []string{}
 	if req.Status != nil && *req.Status != before.Status {
 		if _, ok := busStatusName[*req.Status]; !ok {
-			return httpx.BadRequest("status debe ser active, workshop o ramp_broken")
+			return httpx.BadRequest("status debe ser active, workshop, ramp_broken o retired")
 		}
 		sets = append(sets, "status = ?", "ramp_operational = ?")
 		args = append(args, *req.Status, *req.Status != "ramp_broken")
@@ -621,6 +640,28 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 		}
 		sets, args, changes = append(sets, "model = ?"), append(args, v), append(changes, "modelo")
 	}
+	if req.Serial != nil || req.Year != nil || req.UnitNo != nil || req.Centro != nil {
+		pick := func(p *string, v string) string {
+			if p != nil {
+				return *p
+			}
+			return v
+		}
+		year := before.Year
+		if req.Year != nil {
+			year = req.Year
+			if *year == 0 {
+				year = nil
+			}
+		}
+		ext, err := cleanFleetFields(pick(req.Serial, before.Serial), year, pick(req.UnitNo, before.UnitNo), pick(req.Centro, before.Centro))
+		if err != nil {
+			return err
+		}
+		sets = append(sets, "serial = ?", "year = ?", "unit_no = ?", "centro = ?")
+		args = append(args, ext.Serial, ext.Year, ext.UnitNo, ext.Centro)
+		changes = append(changes, "datos del parque vehicular")
+	}
 	if req.LastMaintenance != nil {
 		var day any
 		if v := strings.TrimSpace(*req.LastMaintenance); v != "" {
@@ -640,7 +681,7 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 	}
 	if req.Status != nil && *req.Status != before.Status {
 		h.Hub.SetRamp(id, *req.Status != "ramp_broken")
-		if *req.Status == "workshop" {
+		if *req.Status == "workshop" || *req.Status == "retired" {
 			if err := h.Dispatch.CloseBusShifts(ctx, id); err != nil {
 				return err
 			}
@@ -653,6 +694,23 @@ func (h *Handler) UpdateBus(w http.ResponseWriter, r *http.Request) error {
 	}
 	httpx.WriteJSON(w, http.StatusOK, b)
 	return nil
+}
+
+// cleanFleetFields validates the fleet-sheet fields of a bus (serie, año, No. de camión, centro).
+func cleanFleetFields(serial string, year *int, unitNo, centro string) (FleetBus, error) {
+	b := FleetBus{Serial: strings.ToUpper(strings.ReplaceAll(serial, " ", "")), Year: year,
+		UnitNo: strings.ToUpper(strings.TrimSpace(unitNo)), Centro: fold(centro)}
+	switch {
+	case !serialPattern.MatchString(b.Serial):
+		return b, httpx.BadRequest("Serie inválida (letras y números, máx. 20)")
+	case year != nil && (*year < 1950 || *year > 2100):
+		return b, httpx.BadRequest("Año inválido")
+	case utf8.RuneCountInString(b.UnitNo) > 8:
+		return b, httpx.BadRequest("No. de camión demasiado largo (máx. 8)")
+	case utf8.RuneCountInString(b.Centro) > 60:
+		return b, httpx.BadRequest("Centro demasiado largo (máx. 60)")
+	}
+	return b, nil
 }
 
 // Track is GET /api/v1/admin/buses/{id}/track?from=RFC3339&to=RFC3339 (max 24 h, 5000 points).

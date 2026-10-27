@@ -1,0 +1,39 @@
+# CI de seguridad y calidad (auditoría ISO 27001 — A.8.8 gestión de vulnerabilidades técnicas,
+# A.8.25 ciclo de vida de desarrollo seguro). Compila, revisa, prueba y escanea dependencias
+# en cada push y PR; govulncheck hace fallar el build ante un CVE alcanzable.
+name: CI
+
+on:
+  push:
+    branches: [main, desarrollo]
+  pull_request:
+    branches: [main, desarrollo]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Compilar
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Tests
+        run: go test ./...
+
+      - name: Escaneo de vulnerabilidades (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...

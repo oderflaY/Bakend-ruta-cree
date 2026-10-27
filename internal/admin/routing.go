@@ -82,6 +82,34 @@ func (h *Handler) RoutePath(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// WalkRoute is GET /api/v1/routing/walk?from=lon,lat&to=lon,lat: the walking path along the streets
+// between the two points, returned as the native OSRM response (geometry + legs/steps) so the rider
+// app can show turn-by-turn by street without a second format. Public (riders, no token): the phone
+// routes through here because the server can reach a foot-profile OSRM even on networks that block it
+// for the phone. Cached and rate-limited like the other public endpoints.
+func (h *Handler) WalkRoute(w http.ResponseWriter, r *http.Request) error {
+	if h.WalkRouting == nil {
+		return httpx.NewError(http.StatusServiceUnavailable, "routing_off", "La guía a pie no está configurada")
+	}
+	q := r.URL.Query()
+	pts, err := parsePoints(q.Get("from")+";"+q.Get("to"), 2, 2)
+	if err != nil {
+		return err
+	}
+	params := url.Values{"overview": {"full"}, "geometries": {"geojson"}, "steps": {"true"}}
+	body, err := h.WalkRouting.get(r.Context(), "/route/v1/walking/"+pts+"?"+params.Encode())
+	if err != nil {
+		return err
+	}
+	// Pass the OSRM answer through unchanged; the app parses the standard shape. A "NoRoute" body
+	// is still 200 here and the app falls back to a straight line on its own.
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	return nil
+}
+
 // StreetName is GET /api/v1/admin/routing/street?point=lon,lat: the nearest street's name (to name
 // a new stop) and the point snapped onto it: {"name": "Boulevard Durango", "lon", "lat"}.
 func (h *Handler) StreetName(w http.ResponseWriter, r *http.Request) error {

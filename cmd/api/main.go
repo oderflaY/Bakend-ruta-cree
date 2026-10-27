@@ -178,7 +178,8 @@ func serve() error {
 		DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, IPs: ips, AllowedOrigins: cfg.AllowedOrigins, PanelDir: cfg.PanelDir,
 		WhatsApp: waHook,
 		Admin: &admin.Handler{DB: pool, Hub: hub, Catalog: catalog, Tokens: tokens, Dispatch: svc, TokenTTL: cfg.AdminTokenTTL,
-			Location: localZone, Routing: admin.NewRouter(cfg.RoutingURL)},
+			Location: localZone, Routing: admin.NewRouter(cfg.RoutingURL),
+			WalkRouting: admin.NewRouter(cfg.WalkingRoutingURL)},
 		Riders: riderHandler,
 		Login:  &login.Handler{DB: pool, Tokens: tokens, Riders: riderHandler, DriverTTL: cfg.DriverTokenTTL},
 	})

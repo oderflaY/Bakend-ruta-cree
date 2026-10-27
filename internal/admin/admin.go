@@ -34,6 +34,8 @@ type Handler struct {
 	Location *time.Location
 	// Street routing for the route editor (OSRM); nil turns the snapping off.
 	Routing *Router
+	// Foot routing for the riders' walk-to-stop guidance (OSRM foot profile); nil turns it off.
+	WalkRouting *Router
 }
 
 // EnsureAdmin creates the first admin from ADMIN_EMAIL / ADMIN_PASSWORD when there is none.

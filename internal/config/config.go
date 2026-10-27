@@ -51,6 +51,9 @@ type Config struct {
 
 	// OSRM server the route editor uses to follow the streets (the public demo by default).
 	RoutingURL string
+	// OSRM server with the foot profile, for the riders' walk-to-stop guidance. The phone routes
+	// through the API (the server can reach it even when a school/office network blocks the phone).
+	WalkingRoutingURL string
 
 	// Bootstrap admin, created only when the admins table is empty.
 	AdminEmail    string
@@ -93,6 +96,7 @@ func Load() (*Config, error) {
 		WhatsAppAPIBase:   env("WHATSAPP_API_BASE", "https://graph.facebook.com/v23.0"),
 		LocalTimeZone:     env("ZONA_HORARIA", "America/Mexico_City"),
 		RoutingURL:        strings.TrimRight(env("ROUTING_URL", "https://router.project-osrm.org"), "/"),
+		WalkingRoutingURL: strings.TrimRight(env("WALKING_ROUTING_URL", "https://routing.openstreetmap.de/routed-foot"), "/"),
 		PositionRetention: 30 * 24 * time.Hour,
 		MaxSocketClients:  5000,
 	}

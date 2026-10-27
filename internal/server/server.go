@@ -82,6 +82,8 @@ func New(ctx context.Context, d Deps) http.Handler {
 	mux.Handle("POST /api/v1/ramp-requests", with(h(d.Dispatch.RequestRamp), riders))
 	mux.Handle("GET /api/v1/ramp-requests/{id}", with(h(d.Dispatch.RampStatus), general))
 	mux.Handle("POST /api/v1/reports", with(h(d.Dispatch.CreateReport), riders))
+	// Walk-to-stop guidance along the streets (OSRM foot, proxied so the phone needn't reach it).
+	mux.Handle("GET /api/v1/routing/walk", with(h(d.Admin.WalkRoute), general))
 
 	// One sign-in for everybody: the server answers with the role (driver or rider).
 	mux.Handle("POST /api/v1/auth/login", with(h(d.Login.Login), loginLimit))
